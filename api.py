@@ -3,6 +3,8 @@ from typing import Any, Dict
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from fastapi.middleware.cors import CORSMiddleware
+
 from aura_agents import (
     run_screen_behavior_agent,
     run_sleep_recovery_agent,
@@ -10,6 +12,20 @@ from aura_agents import (
 )
 
 app = FastAPI(title="AURA Backend", version="0.1.0")
+
+origins = [
+    "http://localhost:3000",  # React dev
+    "http://localhost:5173",  # Vite dev
+    # "https://frontend-domain.com",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ScreenContext(BaseModel):
