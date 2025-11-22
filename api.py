@@ -1,8 +1,7 @@
+# api.py
+
 from typing import Any, Dict
-
 from fastapi import FastAPI
-from pydantic import BaseModel
-
 from fastapi.middleware.cors import CORSMiddleware
 
 from aura_agents import (
@@ -11,61 +10,49 @@ from aura_agents import (
     compute_aura_points,
 )
 
+# -------------------------------
+# FastAPI App Setup
+# -------------------------------
+
 app = FastAPI(title="AURA Backend", version="0.1.0")
 
 origins = [
-    "http://localhost:3000",  # React dev
-    "http://localhost:5173",  # Vite dev
-    # "https://frontend-domain.com",
+    "http://localhost:3000",  # Lovable / React
+    "http://localhost:5173",  # Vite
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origins,        # <= IMPORTANT for frontend calls
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-class ScreenContext(BaseModel):
-    __root__: Dict[str, Any]
-
-
-class SleepContext(BaseModel):
-    __root__: Dict[str, Any]
-
-
-class AuraInput(BaseModel):
-    __root__: Dict[str, Any]
-
+# -------------------------------
+# API Endpoints
+# -------------------------------
 
 @app.post("/screen-agent")
-def screen_agent_endpoint(body: ScreenContext) -> Dict[str, Any]:
+def screen_agent_endpoint(screen_context: Dict[str, Any]) -> Dict[str, Any]:
     """
     Call the Screen Behavior Agent.
-    Frontend sends the screen_context as JSON.
+    The frontend sends JSON – we directly pass it to the agent.
     """
-    screen_context = body.__root__
-    result = run_screen_behavior_agent(screen_context)
-    return result
+    return run_screen_behavior_agent(screen_context)
 
 
 @app.post("/sleep-agent")
-def sleep_agent_endpoint(body: SleepContext) -> Dict[str, Any]:
+def sleep_agent_endpoint(sleep_context: Dict[str, Any]) -> Dict[str, Any]:
     """
     Call the Sleep + Recovery Agent.
     """
-    sleep_context = body.__root__
-    result = run_sleep_recovery_agent(sleep_context)
-    return result
+    return run_sleep_recovery_agent(sleep_context)
 
 
 @app.post("/aura-points")
-def aura_points_endpoint(body: AuraInput) -> Dict[str, Any]:
+def aura_points_endpoint(aura_input: Dict[str, Any]) -> Dict[str, Any]:
     """
     Compute Aura Points / gamification summary.
     """
-    aura_input = body.__root__
-    result = compute_aura_points(aura_input)
-    return result
+    return compute_aura_points(aura_input)

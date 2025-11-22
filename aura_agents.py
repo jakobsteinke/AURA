@@ -6,13 +6,23 @@ import json
 import logging
 import re
 from typing import Any, Dict
-
-brt = boto3.client("bedrock-runtime")
+from dotenv import load_dotenv
+import os
 
 MODEL_ID = "eu.meta.llama3-2-1b-instruct-v1:0"
 
 logging.basicConfig(level=logging.INFO)
 
+load_dotenv()
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+brt = boto3.client(
+    service_name="bedrock-runtime",
+    aws_access_key_id=AWS_ACCESS_KEY_ID, # only needed if running locally
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY, # only needed if running locally
+    region_name="eu-central-1"
+)
 
 def safe_json_loads(text: str) -> Dict[str, Any]:
     """
