@@ -4,3 +4,5 @@ uvicorn
 boto3
 jmespath
 s3transfer
+
+python-dotenv
