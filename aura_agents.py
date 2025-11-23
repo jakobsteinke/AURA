@@ -1,6 +1,5 @@
 import os
 import json
-import re
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -108,7 +107,6 @@ def run_aura_agent(
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
 
-    # Few-shot examples of VALID outputs for the model
     examples = r"""
 Example 1 (everything fine, no notification, no therapist):
 {
@@ -174,7 +172,7 @@ Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT c
 {examples}
 
 IMPORTANT: Therapist decision
-- "write_therapist_mail" must be true if you detect slighlty concerning data or a clear concerning pattern over several days.
+- "write_therapist_mail" must be true if you detect slightly concerning data or a clear concerning pattern over several days.
 - If everything looks fine, keep "write_therapist_mail" false.
 - When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
 - When "write_therapist_mail" is false, those three fields MUST be empty strings.
@@ -195,33 +193,23 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 - "therapist_mail_title": subject line of the email that should be sent to the therapist (concise, can be "")
 - "therapist_mail_content": content of the email that should be sent to the therapist (can be "")
 
-Behavioral rules:
-- You may leave notification_title and notification_description as empty strings if nothing is needed.
-- Consider the ENTIRE history plus the current context.
-- A single concerning day is not enough to contact a therapist, but do contact if there are multiple. IMPORTANT: do not choose this conservatively, if you notice concerning data, use this feature. You can also choose it if the history already contains therapist mails.
-- Set "write_therapist_mail": true if there is a clear pattern of repeated, concerning data over time.
-- If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
+STRICT OUTPUT FORMAT (THIS IS CRITICAL):
+- You MUST produce exactly ONE JSON object for the CURRENT situation.
+- Your reply MUST start with the character '{{' as the very first character of the response.
+- Your reply MUST end with the matching '}}' of that JSON object.
+- Do NOT include any text, explanations, labels, or the word "Example" before or after the JSON.
+- Do NOT wrap the JSON in markdown fences (no ```).
+- The JSON object MUST contain ALL of these keys and NO other keys:
+  "notification_title", "notification_description",
+  "write_therapist_mail", "therapist_mail_address",
+  "therapist_mail_title", "therapist_mail_content".
 
-Therapist email rule:
-- Use residence_location to choose a plausible local therapist or mental health service email.
-- If you are unsure, use a generic mental health support email for that city or country (e.g. a local counseling center).
-
-Tone guidelines:
-- Notifications should be supportive and non-judgmental.
-- Focus on small, realistic next steps (e.g. "take a short walk", "wind down for sleep", "reduce screen time slightly").
-
-Output format (VERY IMPORTANT):
-- You MUST respond with a single valid JSON object.
-- Do NOT wrap it in markdown fences.
-- Do NOT add any text before or after the JSON.
-- The JSON MUST have exactly these keys:
-  "notification_title", "notification_description", "write_therapist_mail",
-  "therapist_mail_address", "therapist_mail_title", "therapist_mail_content".
+Now, based on the CURRENT context and history only, output that single JSON object.
 """
 
     response_text = call_bedrock_converse(user_message)
 
-    # Simple JSON parsing using the few-shot guidance
+    # Simple JSON parsing using the strict format instructions
     try:
         result = json.loads(response_text)
     except json.JSONDecodeError:
@@ -264,15 +252,12 @@ def update_history(
 
     # --- Step 1: Determine timestamp for new entry ---
     if created_at:
-        # if explicitly given, use it
         ts = _dt.datetime.fromisoformat(created_at)
     else:
         if history:
-            # Take the last history timestamp and add 7 days for testing purposes
             last_ts = _dt.datetime.fromisoformat(history[-1]["created_at"])
             ts = last_ts + _dt.timedelta(days=7)
         else:
-            # First entry → use now()
             ts = _dt.datetime.utcnow()
 
     # --- Step 2: Construct the new entry ---
