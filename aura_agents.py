@@ -36,7 +36,7 @@ def call_bedrock_converse(
     user_message: str,
     model_id: str = MODEL_ID,
     max_tokens: int = 512,
-    temperature: float = 0.8,
+    temperature: float = 0.5,
     top_p: float = 0.9,
 ) -> str:
     """
