@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -13,7 +14,7 @@ from db_models import User, DailyMetrics, AuraAgentOutput
 # Config & Bedrock client
 # ---------------------------------------------------------------------
 
-MODEL_ID = "eu.meta.llama3-2-1b-instruct-v1:0"
+MODEL_ID = "eu.anthropic.gpt-5-mini-v1:0"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,6 +30,67 @@ brt = boto3.client(
 )
 
 # ---------------------------------------------------------------------
+# JSON helper
+# ---------------------------------------------------------------------
+
+def safe_json_loads(text: str) -> Dict[str, Any]:
+    """
+    Safely parse JSON from model output.
+
+    - Strips markdown fences and whitespace.
+    - Keeps only the substring from first '{' to last '}'.
+    - Tries json.loads; if it fails, auto-closes up to 3 missing '}'.
+    - Returns {} on failure.
+    """
+    if not text:
+        return {}
+
+    cleaned = text.strip()
+
+    # Strip ```json fences if present
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first == -1 or last == -1 or last <= first:
+        logging.error("No JSON object found in model output: %r", text)
+        return {}
+
+    candidate = cleaned[first:last + 1]
+
+    try:
+        obj = json.loads(candidate)
+    except json.JSONDecodeError:
+        open_count = candidate.count("{")
+        close_count = candidate.count("}")
+        max_extra_braces = 3
+        obj = None
+
+        for _ in range(max_extra_braces):
+            if close_count >= open_count:
+                break
+            candidate += "}"
+            close_count += 1
+            try:
+                obj = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                obj = None
+
+        if obj is None:
+            logging.error("Failed to parse model JSON even after repair; raw=%r", text)
+            return {}
+
+    if not isinstance(obj, dict):
+        logging.error("Parsed JSON is not an object: %r", obj)
+        return {}
+
+    return obj
+
+# ---------------------------------------------------------------------
 # Bedrock wrapper
 # ---------------------------------------------------------------------
 
@@ -36,7 +98,7 @@ def call_bedrock_converse(
     user_message: str,
     model_id: str = MODEL_ID,
     max_tokens: int = 512,
-    temperature: float = 0.7,
+    temperature: float = 0.8,
     top_p: float = 0.9,
 ) -> str:
     """
@@ -91,7 +153,7 @@ def run_aura_agent(
                "agent_output": {... stored_output ...}
              }
 
-    Output JSON keys:
+    Output: dict with keys (any may be empty strings / False):
       - notification_title: str
       - notification_description: str
       - write_therapist_mail: bool
@@ -102,64 +164,19 @@ def run_aura_agent(
     if history is None:
         history = []
 
-    # Only last 10 entries for sanity
-    history = history[-10:]
+    history = history[-10:]  # only last 10 entries
 
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
-
-    # Simple deterministic style seed → more variety but reproducible
-    style_index = len(history) % 4
-    if style_index == 0:
-        style_profile = "warm and encouraging coach, focusing on gentle suggestions."
-    elif style_index == 1:
-        style_profile = "calm and factual observer, focusing on clear, neutral wording."
-    elif style_index == 2:
-        style_profile = "gentle but slightly more firm reminder, emphasizing follow-through."
-    else:
-        style_profile = "practical guide, suggesting 1–2 concrete next steps."
-
-    # Examples deliberately avoid specific numeric values to reduce copying
-    examples = r"""
-Example 1 (everything fine, no notification, no therapist):
-{
-  "notification_title": "",
-  "notification_description": "",
-  "write_therapist_mail": false,
-  "therapist_mail_address": "",
-  "therapist_mail_title": "",
-  "therapist_mail_content": ""
-}
-
-Example 2 (mildly concerning day, notification only):
-{
-  "notification_title": "Gentle reminder to rest",
-  "notification_description": "You seem to have slept less than usual and spent a lot of time on screens. Try to take a short break and wind down a bit earlier today.",
-  "write_therapist_mail": false,
-  "therapist_mail_address": "",
-  "therapist_mail_title": "",
-  "therapist_mail_content": ""
-}
-
-Example 3 (repeated concerning pattern, suggest therapist):
-{
-  "notification_title": "Consider getting extra support",
-  "notification_description": "Your recent days show very poor sleep and high screen time. It might help to talk to a professional about how you’re feeling.",
-  "write_therapist_mail": true,
-  "therapist_mail_address": "info@psychotherapie-muenchen.de",
-  "therapist_mail_title": "Request for an initial consultation",
-  "therapist_mail_content": "Dear therapist,\n\nI have been experiencing poor sleep and high stress for several days in a row. I would like to ask for an initial consultation to discuss my situation and possible next steps.\n\nKind regards,\nA concerned patient"
-}
-"""
 
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
 You receive:
-1. The CURRENT daily context as JSON:
+1. The current daily context as JSON:
 {current_context_json}
 
-2. The HISTORY of your last outputs (oldest first, up to 10 entries).
+2. The history of your last outputs (oldest first, up to 10 entries).
    Each entry has this shape:
    {{
      "created_at": "... ISO timestamp ...",
@@ -171,130 +188,70 @@ You receive:
 Your goals:
 - Decide whether to show the user a notification right now.
 - If so, make the notification short, specific, and caring.
-- Only when clearly justified, suggest contacting a therapist via email.
+- Very rarely, decide whether to suggest contacting a therapist via email.
 
-STYLE PROFILE FOR THIS RESPONSE:
-- For this response, write like a {style_profile}
-
-------------------- INPUT FIELD SEMANTICS -------------------
 Input fields (may be missing or null):
-- last_nights_sleep_duration_hours:
-    TOTAL number of hours the user actually slept last night.
-    Example: 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short.
-- resting_hr_bpm:
-    The user's resting heart rate in beats per minute.
-- total_screen_minutes:
-    Total minutes spent on screens today.
-- steps:
-    Total steps walked today.
-- long_sessions_over_20_min:
-    Number of long screen sessions (> 20 minutes) today.
-- residence_location:
-    The city and country where the user lives.
+- last_nights_sleep_duration_hours: TOTAL number of hours the user actually slept last night (for example 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short).
+- resting_hr_bpm: the user's resting heart rate in beats per minute.
+- total_screen_minutes: total minutes spent on screens today.
+- steps: total steps walked today.
+- long_sessions_over_20_min: number of long screen sessions (> 20 minutes) today.
+- residence_location: the city and country where the user lives.
 
-------------------- RISK CLASSIFICATION RULES -------------------
-MENTALLY, classify days like this (do NOT output the labels, just use them internally):
+IMPORTANT: Therapist decision
+- "write_therapist_mail" must be true if you detect slighlty concerning data.
+- If everything looks fine, keep "write_therapist_mail" false.
+- When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
+- When "write_therapist_mail" is false, those three fields MUST be empty strings.
 
-A day is SEVERE if ANY of these hold:
-- last_nights_sleep_duration_hours is not null AND < 2.0
-- steps is not null AND < 500
-- total_screen_minutes is not null AND > 720
-- long_sessions_over_20_min is not null AND >= 20
-
-A day is CONCERNING (but not necessarily SEVERE) if ANY of these hold:
-- last_nights_sleep_duration_hours is not null AND < 4.0
-- steps is not null AND < 2000
-- total_screen_minutes is not null AND > 480
-- long_sessions_over_20_min is not null AND >= 12
-
-Otherwise the day is OK.
-
-Look at the 5 most recent days: up to the last 4 entries from the history (newest first) plus the current day.
-
-------------------- THERAPIST DECISION LOGIC -------------------
-Use the following logic for write_therapist_mail:
-
-- Let window_5 be the last 5 days (up to 4 history entries + current day).
-- Count how many days in window_5 are SEVERE and how many are CONCERNING.
-
-Set write_therapist_mail = true if ANY of these are true:
-1) There are at least 3 days that are CONCERNING or SEVERE in window_5.
-2) There are at least 2 SEVERE days in window_5.
-3) Today is SEVERE AND there is at least 1 other CONCERNING or SEVERE day in window_5.
-
-Otherwise set write_therapist_mail = false.
-
-When write_therapist_mail is true:
-- You MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
-- therapist_mail_content should be a short, respectful email body that the user could send.
-
-When write_therapist_mail is false:
-- therapist_mail_address, therapist_mail_title, therapist_mail_content MUST be empty strings.
-
-------------------- STRICT RULES ABOUT NUMBERS -------------------
-THIS IS VERY IMPORTANT:
-
-- You MUST NOT invent any numeric values (hours, minutes, steps, heart rate, counts).
-- If you mention a concrete number (like hours of sleep, minutes on screen, or steps),
-  it MUST come directly from the CURRENT context or from a specific day in the HISTORY.
-- If you mention last_nights_sleep_duration_hours in the CURRENT day, you MUST use exactly
-  the numeric value from current_context["last_nights_sleep_duration_hours"].
-- You MUST NOT write phrases like "X hours too short" because the required baseline sleep
-  (how many hours the user needs) is NOT provided.
-- If a field is null or missing, you MUST NOT invent a numeric value for it.
-  In that case, speak qualitatively (e.g., "less sleep than usual" if history supports it)
-  or avoid mentioning numbers at all.
-
-------------------- VARIETY & NON-REPETITION -------------------
+IMPORTANT: Do not repeat yourself
 - Read all previous "agent_output" objects in the history, especially:
-    - notification_title
-    - notification_description
-- You MUST NOT return exactly the same notification_title and notification_description
-  as any previous history entry.
-- Avoid repeating short generic phrases like "Consider getting extra support" over and over:
-  rephrase them or give slightly more specific guidance.
-- If your best advice is similar to something you said before, rephrase it and/or make it
-  more specific, or slightly escalated (for example, add a concrete next step or timing).
-- Over time, as the pattern continues without improvement, your wording should reflect
-  increasing urgency and care (while still being supportive and non-judgmental).
+  - notification_title
+  - notification_description
+- You MUST NOT return exactly the same notification_title and notification_description as any previous history entry.
+- If your best advice is similar to something you said before, you MUST rephrase it and/or make it slightly more specific or escalated (for example, suggest a concrete next step or timing).
+- Over time, as the pattern continues without improvement, your wording should reflect increasing urgency and care (while still being supportive and non-judgmental).
 
-------------------- OUTPUT SCHEMA -------------------
-You MUST return exactly one JSON object with ALL of these keys and NO other keys:
+Output fields and meaning (you MUST always include all keys in the JSON object):
+- "notification_title": short title for a popup notification to the user (can be empty string "" if no notification is needed because everything is fine)
+- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "" if no notification is needed because everything is fine)
+- "write_therapist_mail": boolean, true only if you think a therapist should be contacted (set it to true if the user repeatedly ignores your advice and does not improve over time)
+- "therapist_mail_address": email address of a therapist or mental health service near the residence_location when write_therapist_mail is true, else ""
+- "therapist_mail_title": subject line of the email that should be sent to the therapist (concise, can be "")
+- "therapist_mail_content": content of the email that shoul be sent to the therapist (can be "")
 
-- "notification_title": short title for a popup notification to the user
-    (can be empty string "" if no notification is needed)
-- "notification_description": 1–2 sentences suggesting what the user could do next
-    (can be empty "" if no notification is needed)
-- "write_therapist_mail": boolean
-- "therapist_mail_address": string
-- "therapist_mail_title": string
-- "therapist_mail_content": string
+Behavioral rules:
+- You may leave notification_title and notification_description as empty strings if nothing is needed.
+- Consider the ENTIRE history plus the current context.
+- A single concerning day is not enough to contact a therapist, but do contact if there are multiple. IMPORTANT: do not choose this conservatively, if you notice concerning data, use this feature. You can also choose it if the history already contains therapist mails.
+- Set "write_therapist_mail": true if there is a clear pattern of repeated, concerning data over time.
+- If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
 
-Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT copy them literally, adapt to the current data):
-{examples}
+Therapist email rule:
+- Use residence_location to choose a plausible local therapist or mental health service email.
+- If you are unsure, use a generic mental health support email for that city or country (e.g. a local counseling center).
 
-------------------- STRICT OUTPUT FORMAT (CRITICAL) -------------------
-- You MUST produce exactly ONE JSON object for the CURRENT situation.
-- Your reply MUST start with the character '{{' as the very first character of the response.
-- Your reply MUST end with the matching '}}' of that JSON object.
-- Do NOT include any text, explanations, labels, or the word "Example" before or after the JSON.
-- Do NOT wrap the JSON in markdown fences (no ```).
-- The JSON object MUST contain ALL of these keys and NO other keys:
-  "notification_title", "notification_description",
-  "write_therapist_mail", "therapist_mail_address",
-  "therapist_mail_title", "therapist_mail_content".
+Tone guidelines:
+- Notifications should be supportive and non-judgmental.
+- Focus on small, realistic next steps (e.g. "take a short walk", "wind down for sleep", "reduce screen time slightly").
 
-Now, think step by step silently (do NOT output your reasoning), then output that single JSON object.
+Output format:
+You must respond with a single JSON object and nothing else.
+DO NOT include any explanations, comments, or text outside JSON.
+Use exactly this schema:
+
+{{
+  "notification_title": "string",
+  "notification_description": "string",
+  "write_therapist_mail": boolean,
+  "therapist_mail_address": "string",
+  "therapist_mail_title": "string",
+  "therapist_mail_content": "string"
+}}
 """
 
     response_text = call_bedrock_converse(user_message)
-
-    # Simple JSON parsing using the strict format instructions
-    try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError:
-        logging.error("Failed to parse model JSON: %r", response_text)
-        result = {}
+    result = safe_json_loads(response_text)
 
     # Ensure all keys exist with defaults
     result.setdefault("notification_title", "")
@@ -332,12 +289,15 @@ def update_history(
 
     # --- Step 1: Determine timestamp for new entry ---
     if created_at:
+        # if explicitly given, use it
         ts = _dt.datetime.fromisoformat(created_at)
     else:
         if history:
+            # Take the last history timestamp and add 7 days for testing purposes
             last_ts = _dt.datetime.fromisoformat(history[-1]["created_at"])
             ts = last_ts + _dt.timedelta(days=7)
         else:
+            # First entry → use now()
             ts = _dt.datetime.utcnow()
 
     # --- Step 2: Construct the new entry ---
@@ -505,8 +465,10 @@ def run_aura_for_user(
 
 if __name__ == "__main__":
     try:
+        # Demo without override → uses DailyMetrics
         output = run_aura_for_user(user_id=1)
         print("=== AURA Agent Output ===")
         print(json.dumps(output, indent=2, ensure_ascii=False))
     except Exception as e:
         logging.error("Demo failed: %s", e)
+
