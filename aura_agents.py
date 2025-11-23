@@ -228,7 +228,7 @@ Use exactly this schema:
 {{
   "notification_title": "string",
   "notification_description": "string",
-  "write_therapist_mail": false,
+  "write_therapist_mail": boolean,
   "therapist_mail_address": "string",
   "therapist_mail_title": "string",
   "therapist_mail_content": "string"
