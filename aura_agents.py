@@ -91,6 +91,77 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     return obj
 
 # ---------------------------------------------------------------------
+# Aura points helpers  (NEW)
+# ---------------------------------------------------------------------
+
+def is_positive_day(ctx: Dict[str, Any]) -> bool:
+    """
+    Heuristic to decide if a given day is 'positive'.
+    You can tweak these rules to match your product definition.
+    """
+    if not ctx:
+        return False
+
+    steps = ctx.get("steps") or 0
+    sleep = ctx.get("last_nights_sleep_duration_hours")
+    screen = ctx.get("total_screen_minutes")
+    long_sessions = ctx.get("long_sessions_over_20_min")
+
+    positive_signals = 0
+
+    # Example heuristics – adjust thresholds as needed
+    if steps >= 8000:
+        positive_signals += 1
+    if sleep is not None and sleep >= 7.0:
+        positive_signals += 1
+    if screen is not None and screen <= 180:  # <= 3 hours
+        positive_signals += 1
+    if long_sessions is not None and long_sessions <= 3:
+        positive_signals += 1
+
+    # At least one positive indicator counts as a positive day
+    return positive_signals > 0
+
+
+def compute_aura_points(
+    history: List[Dict[str, Any]],
+    current_context: Dict[str, Any],
+) -> int:
+    """
+    Compute aura points in [0, 100] based on:
+    - overall fraction of positive days
+    - length of the current positive streak (including today)
+    """
+    # Collect contexts for all days: history + today
+    contexts: List[Dict[str, Any]] = [
+        (entry.get("context") or {}) for entry in (history or [])
+    ] + [current_context or {}]
+
+    if not contexts:
+        return 0
+
+    flags = [is_positive_day(c) for c in contexts]
+    total_days = len(flags)
+    positive_days = sum(flags)
+
+    # Compute current streak: consecutive positives from the end
+    streak = 0
+    for flag in reversed(flags):
+        if flag:
+            streak += 1
+        else:
+            break
+
+    ratio = positive_days / total_days  # between 0 and 1
+
+    # Simple scoring: combine ratio and streak
+    # - Up to 40 points from ratio
+    # - Up to 10 * streak points, capped by 100 overall
+    raw_score = int(40 * ratio + 10 * streak)
+    aura_points = max(0, min(100, raw_score))
+    return aura_points
+
+# ---------------------------------------------------------------------
 # Bedrock wrapper
 # ---------------------------------------------------------------------
 
@@ -170,6 +241,7 @@ def run_aura_agent(
       - therapist_mail_address: str
       - therapist_mail_title: str
       - therapist_mail_content: str
+      - aura_points: int (0–100, computed locally from history + today)
     """
     if history is None:
         history = []
@@ -276,6 +348,10 @@ Now, based ONLY on the CURRENT context and HISTORY, output that single JSON obje
         result["therapist_mail_title"] = ""
         result["therapist_mail_content"] = ""
 
+    # NEW: compute aura_points from history + today's context
+    aura_points = compute_aura_points(history, current_context)
+    result["aura_points"] = aura_points
+
     return result
 
 
@@ -324,13 +400,12 @@ def run_aura_for_user(
     """
     High-level helper:
     - Loads AuraAgentOutput rows as history (including context snapshots),
-    - Uses either:
-        * the provided current_context_override (from API), OR
-        * today's DailyMetrics for the user (legacy fallback),
+    - Uses:
+        * the provided current_context_override (from API),
     - Calls the AURA agent,
     - Uses update_history() to append a new entry with +7 days,
     - Stores only the last 10 outputs in the database,
-    - Returns the full agent output (including therapist mail data) to the caller.
+    - Returns the full agent output (including therapist mail data + aura_points) to the caller.
     """
     import datetime
 
@@ -375,7 +450,7 @@ def run_aura_for_user(
         # 4) Use update_history to add the new entry with +7 days
         updated_history = update_history(
             history_for_llm,
-            agent_output,    # store full output INCLUDING therapist info
+            agent_output,    # store full output INCLUDING therapist info & aura_points
             current_context,
             created_at=None, # let update_history handle +7 days logic
             max_len=10,
@@ -391,9 +466,9 @@ def run_aura_for_user(
         # 5) Insert new row with synthetic created_at
         new_row = AuraAgentOutput(
             user_id=user.user_id,
-            output=stored_output,   # now includes therapist fields
+            output=stored_output,
             context=stored_context,
-            created_at=created_at_dt,  # override default timestamp
+            created_at=created_at_dt,
         )
         session.add(new_row)
         session.commit()
@@ -412,7 +487,7 @@ def run_aura_for_user(
             session.commit()
 
         # Return:
-        # - agent_output: full result (with therapist info if present)
+        # - agent_output: full result (with therapist info + aura_points if present)
         # - history_used: what the LLM actually saw (before new entry)
         # - current_context: today's / override context
         return {
@@ -430,8 +505,16 @@ def run_aura_for_user(
 
 if __name__ == "__main__":
     try:
-        # Demo without override → uses DailyMetrics
-        output = run_aura_for_user(user_id=1)
+        # In your current version, this will only work if you pass a proper
+        # current_context_override in run_aura_for_user.
+        output = run_aura_for_user(user_id=1, current_context_override={
+            "last_nights_sleep_duration_hours": 7.5,
+            "resting_hr_bpm": 60,
+            "total_screen_minutes": 150,
+            "steps": 9000,
+            "long_sessions_over_20_min": 2,
+            "residence_location": "Munich, Germany",
+        })
         print("=== AURA Agent Output ===")
         print(json.dumps(output, indent=2, ensure_ascii=False))
     except Exception as e:
