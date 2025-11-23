@@ -68,6 +68,15 @@ def call_bedrock_converse(
 # Single AURA Agent (LLM logic only)
 # ---------------------------------------------------------------------
 
+def _fmt(value: Any) -> str:
+    """Human-readable formatting for context fields."""
+    if value is None:
+        return "unknown"
+    return str(value)
+
+def _bool(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
 def run_aura_agent(
     current_context: Dict[str, Any],
     history: Optional[List[Dict[str, Any]]] = None,
@@ -98,10 +107,58 @@ def run_aura_agent(
 
     history = history[-10:]  # only last 10 entries
 
-    current_context_json = json.dumps(current_context, ensure_ascii=False)
-    history_json = json.dumps(history, ensure_ascii=False)
+    # JSON versions for precision
+    current_context_json = json.dumps(current_context, ensure_ascii=False, indent=2)
+    history_json = json.dumps(history, ensure_ascii=False, indent=2)
 
-    # IMPORTANT: no hard-coded numbers in examples
+    # -----------------------------------------------------------------
+    # Human-readable explanation of current context
+    # -----------------------------------------------------------------
+    cc = current_context or {}
+    current_context_readable = f"""
+CURRENT DAY (most recent data)
+- Sleep last night (hours): {_fmt(cc.get("last_nights_sleep_duration_hours"))}
+  (This is the TOTAL time slept, not how much is missing.)
+- Resting heart rate (bpm): {_fmt(cc.get("resting_hr_bpm"))}
+- Total screen time today (minutes): {_fmt(cc.get("total_screen_minutes"))}
+- Steps today: {_fmt(cc.get("steps"))}
+- Long screen sessions over 20 minutes today: {_fmt(cc.get("long_sessions_over_20_min"))}
+- Residence location (city, country): {_fmt(cc.get("residence_location"))}
+""".strip()
+
+    # -----------------------------------------------------------------
+    # Human-readable explanation of history
+    # -----------------------------------------------------------------
+    history_lines: List[str] = []
+    if history:
+        history_lines.append("HISTORY OF PREVIOUS AGENT CALLS (oldest first):")
+        for idx, h in enumerate(history, start=1):
+            ctx = h.get("context") or {}
+            out = h.get("agent_output") or {}
+            created = _fmt(h.get("created_at"))
+            history_lines.append(
+                f"""
+Entry #{idx}
+- Timestamp: {created}
+- Sleep that night (hours): {_fmt(ctx.get("last_nights_sleep_duration_hours"))}
+- Resting heart rate (bpm): {_fmt(ctx.get("resting_hr_bpm"))}
+- Total screen time that day (minutes): {_fmt(ctx.get("total_screen_minutes"))}
+- Steps that day: {_fmt(ctx.get("steps"))}
+- Long screen sessions that day: {_fmt(ctx.get("long_sessions_over_20_min"))}
+- Residence location: {_fmt(ctx.get("residence_location"))}
+- Previous notification title: {_fmt(out.get("notification_title"))}
+- Previous notification description: {_fmt(out.get("notification_description"))}
+- Previously suggested contacting a therapist?: {_bool(out.get("write_therapist_mail"))}
+"""
+            )
+    else:
+        history_lines.append("No previous history entries are available for this user.")
+
+    history_readable = "\n".join(history_lines)
+
+    # -----------------------------------------------------------------
+    # Examples (no hard-coded thresholds, but concrete JSON structure)
+    # -----------------------------------------------------------------
     examples = r"""
 Example 1 (everything fine, no notification, no therapist):
 {
@@ -134,20 +191,26 @@ Example 3 (repeated concerning pattern, suggest therapist):
 }
 """
 
+    # -----------------------------------------------------------------
+    # Prompt to LLM
+    # -----------------------------------------------------------------
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
-You receive:
-1. The current daily context as JSON:
+You receive TWO views of the data:
+
+1) A HUMAN-READABLE EXPLANATION of the current context and history:
+
+{current_context_readable}
+
+{history_readable}
+
+2) The SAME INFORMATION in RAW JSON form for exact numeric values:
+
+CURRENT_CONTEXT_JSON:
 {current_context_json}
 
-2. The history of your last outputs (oldest first, up to 10 entries).
-   Each entry has this shape:
-   {{
-     "created_at": "... ISO timestamp ...",
-     "context": {{ ...metrics at that time... }},
-     "agent_output": {{ ...your previous decision... }}
-   }}:
+HISTORY_JSON:
 {history_json}
 
 Your goals:
@@ -155,7 +218,7 @@ Your goals:
 - If so, make the notification short, specific, and caring.
 - Very rarely, decide whether to suggest contacting a therapist via email.
 
-Input fields (may be missing or null):
+Semantics of the input fields:
 - last_nights_sleep_duration_hours: TOTAL number of hours the user actually slept last night
   (for example 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short).
 - resting_hr_bpm: the user's resting heart rate in beats per minute.
