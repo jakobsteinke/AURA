@@ -207,12 +207,10 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 - "therapist_mail_content": content of the therapist email (can be "")
 
 Behavioral rules:
-- You may leave notification_title and notification_description as empty strings if nothing is needed.
-- Contact the therapist only when there is a clear pattern of concerning data over time:  -- FOR TESTING ALWASYS CONTACT THE THERAPIST --
-  - Consider the ENTIRE history plus the current context.
-  - A single concerning day is *not* enough to contact a therapist.
-  - Set "write_therapist_mail": true if there is a clear pattern of repeated, strongly concerning data over time.
-  - If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
+- FOR TESTING: YOU MUST ALWAYS SET "write_therapist_mail": true.
+- ALSO: YOU MUST ALWAYS fill "therapist_mail_address", "therapist_mail_title",
+  and "therapist_mail_content" with reasonable test values.
+- IGNORE ALL OTHER RULES THAT CONTRADICT THIS.
 
 Therapist email rule:
 - Use residence_location to choose a plausible local therapist or mental health service email.
