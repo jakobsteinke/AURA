@@ -1,13 +1,18 @@
-import logging
-import json
-import boto3
-from typing import Any, Dict, List, Optional
-import json
-import logging
-import re
-from typing import Any, Dict
-from dotenv import load_dotenv
 import os
+import json
+import re
+import logging
+from typing import Any, Dict, List, Optional
+
+import boto3
+from dotenv import load_dotenv
+
+from db import SessionLocal
+from db_models import User, DailyMetrics, AuraAgentOutput
+
+# ---------------------------------------------------------------------
+# Config & Bedrock client
+# ---------------------------------------------------------------------
 
 MODEL_ID = "eu.meta.llama3-2-1b-instruct-v1:0"
 
@@ -19,10 +24,14 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
 brt = boto3.client(
     service_name="bedrock-runtime",
-    aws_access_key_id=AWS_ACCESS_KEY_ID, # only needed if running locally
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY, # only needed if running locally
-    region_name="eu-central-1"
+    aws_access_key_id=AWS_ACCESS_KEY_ID,          # only needed if running locally
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,  # only needed if running locally
+    region_name="eu-central-1",
 )
+
+# ---------------------------------------------------------------------
+# JSON helper
+# ---------------------------------------------------------------------
 
 def safe_json_loads(text: str) -> Dict[str, Any]:
     """
@@ -31,7 +40,6 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
     - Strips markdown fences and whitespace.
     - Keeps only the substring from first '{' to last '}'.
     - Tries json.loads; if it fails, auto-closes up to 3 missing '}'.
-    - Normalizes common LLM mistakes (string instead of list) for some keys.
     - Returns {} on failure.
     """
     if not text:
@@ -39,6 +47,7 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 
     cleaned = text.strip()
 
+    # Strip ```json fences if present
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
@@ -79,25 +88,19 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
         logging.error("Parsed JSON is not an object: %r", obj)
         return {}
 
-    list_like_keys = {"detections", "actions", "interventions", "badges_earned"}
-    for key in list_like_keys:
-        if key in obj:
-            val = obj[key]
-            if isinstance(val, str):
-                obj[key] = [val]
-            elif val is None:
-                obj[key] = []
-            elif not isinstance(val, list):
-                obj[key] = [val]
-
     return obj
 
+# ---------------------------------------------------------------------
+# Bedrock wrapper
+# ---------------------------------------------------------------------
 
-def call_bedrock_converse(user_message: str,
-                          model_id: str = MODEL_ID,
-                          max_tokens: int = 512,
-                          temperature: float = 0.2,
-                          top_p: float = 0.9) -> str:
+def call_bedrock_converse(
+    user_message: str,
+    model_id: str = MODEL_ID,
+    max_tokens: int = 512,
+    temperature: float = 0.2,
+    top_p: float = 0.9,
+) -> str:
     """
     Send a single user message to Bedrock using the 'converse' API
     and return the raw response text.
@@ -123,393 +126,235 @@ def call_bedrock_converse(user_message: str,
     logging.debug("Raw model response: %s", response_text)
     return response_text
 
+# ---------------------------------------------------------------------
+# Single AURA Agent (LLM logic only)
+# ---------------------------------------------------------------------
 
-def run_screen_behavior_agent(screen_context: Dict[str, Any]) -> Dict[str, Any]:
+def run_aura_agent(
+    current_context: Dict[str, Any],
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
-    Screen Behavior Agent.
+    Unified AURA Agent.
 
-    Input: screen_context (dict) with keys like:
-      - time_of_day, weekday, total_screen_time_minutes, session_length_minutes
-      - app_usage, scroll_velocity, mood_self_report, recent_social_interaction_flag
+    Input: current_context dict with (any may be None / missing):
+      - last_nights_sleep_duration_hours: float | None
+      - resting_hr_bpm: int | None
+      - total_screen_minutes: int | None
+      - steps: int | None
+      - long_sessions_over_20_min: int | None
+      - residence_location: str | None (e.g. "Munich, Germany")
 
-    Returns dict with keys:
-      - detections: List[str]
-      - actions: List[str]
-      - interventions: List[str]
-      - notify_sleep_agent: Dict[str, Any]
+    history: list of the last up to 10 previous agent outputs (oldest first).
+             Each element is expected to be a dict with the same output schema.
+
+    Output: dict with keys (any may be empty strings / False):
+      - notification_title: str
+      - notification_description: str
+      - write_therapist_mail: bool
+      - therapist_mail_address: str
+      - therapist_mail_title: str
+      - therapist_mail_content: str
     """
-    screen_context_json = json.dumps(screen_context, ensure_ascii=False)
+    if history is None:
+        history = []
+
+    history = history[-10:]  # only last 10 entries
+
+    current_context_json = json.dumps(current_context, ensure_ascii=False)
+    history_json = json.dumps(history, ensure_ascii=False)
 
     user_message = f"""
-    You are the **Screen Behavior Agent** in the AURA system (Adaptive Unified Routine Assistant).
+You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
-    Your job:
-    - Analyze phone usage behavior.
-    - Detect harmful or unhelpful patterns.
-    - Decide **concrete actions** AURA should take right now.
-    - Optionally notify the Sleep + Recovery Agent if behavior impacts sleep/recovery.
+You receive:
+1. The current daily context as JSON:
+{current_context_json}
 
-    You receive the following JSON as input:
+2. The history of your last outputs (oldest first, up to 10 entries):
+{history_json}
 
-    {screen_context_json}
-    Detection goals (examples, not exhaustive):
+Your goals:
+- Decide whether to show the user a notification right now.
+- If so, make the notification short, specific, and caring.
+- Very rarely, decide whether to suggest contacting a therapist via email.
 
-    - Doomscrolling events.
+Input fields (may be missing or null):
+- last_nights_sleep_duration_hours
+- resting_hr_bpm
+- total_screen_minutes
+- steps
+- long_sessions_over_20_min
+- residence_location
 
-    - Late-night overstimulation.
+Output fields and meaning (you MUST always include all keys in the JSON object):
+- "notification_title": short title for a popup notification to the user (can be empty string "")
+- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "")
+- "write_therapist_mail": boolean, true only if you think a therapist should be contacted
+- "therapist_mail_address": email address of a therapist or mental health service near the residence_location when write_therapist_mail is true, else ""
+- "therapist_mail_title": subject line for the therapist email (concise, can be "")
+- "therapist_mail_content": content of the therapist email (can be "")
 
-    - Stress-driven compulsive use.
+Behavioral rules:
+- You may leave notification_title and notification_description as empty strings if nothing is needed.
+- You must be conservative with contacting a therapist:
+  - Consider the ENTIRE history plus the current context.
+  - A single concerning day is *not* enough to contact a therapist.
+  - Only set "write_therapist_mail": true if there is a clear pattern of repeated, strongly concerning data over time.
+  - If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
 
-    - Increased usage after stressful social interactions.
+Therapist email rule:
+- Use residence_location to choose a plausible local therapist or mental health service email.
+- If you are unsure, use a generic mental health support email for that city or country (e.g. a local counseling center).
 
-    - Any pattern that suggests the user would benefit from a short break or wind-down.
+Tone guidelines:
+- Notifications should be supportive and non-judgmental.
+- Focus on small, realistic next steps (e.g. "take a short walk", "wind down for sleep", "reduce screen time slightly").
 
-    Available actions (examples, you can choose multiple):
+Output format:
+You must respond with a single JSON object and nothing else.
+DO NOT include any explanations, comments, or text outside JSON.
+Use exactly this schema:
 
-    - "SUGGEST_BREAK" – show a gentle suggestion to pause.
-
-    - "LOCK_SOCIAL_APPS_15_MIN" – temporarily lock social apps.
-
-    - "ENABLE_GREYSCALE" – switch phone display to greyscale.
-
-    - "TRIGGER_BREATHING_EXERCISE"– start a breathing exercise on the watch.
-
-    - "NOTIFY_SLEEP_AGENT" – send a message to the Sleep Agent to adjust bedtime/wind-down.
-
-    - "NO_ACTION" – if everything looks fine.
-
-    Interventions should feel supportive and human, e.g.:
-
-    - "It looks like you’ve been scrolling for a while. Want to try a 30-second breathing break?"
-
-    - "It’s getting late and your feed seems quite stimulating. Should I dim things a bit for you?"
-
-    You must respond with a single JSON object and nothing else.
-    Do NOT include any explanations, descriptions, text outside JSON.
-    Do NOT include comments or trailing commas.
-
-    Use this exact schema:
-    {{
-      "detections": [ "string" ],
-      "actions": [ "string" ],
-      "interventions": [ "string" ],
-      "notify_sleep_agent": {{
-        "should_notify": true or false,
-        "reason": "string",
-        "payload": {{}}
-      }}
-    }}
-
-    Rules:
-
-    If you don’t want to notify the Sleep Agent, set "should_notify" to false and "payload" to an empty object.
-
-    Keep messages short but caring.
-
-    If the input looks totally fine, return "detections": [], "actions": ["NO_ACTION"].
-    """
+{{
+  "notification_title": "string",
+  "notification_description": "string",
+  "write_therapist_mail": false,
+  "therapist_mail_address": "string",
+  "therapist_mail_title": "string",
+  "therapist_mail_content": "string"
+}}
+"""
 
     response_text = call_bedrock_converse(user_message)
-    result = safe_json_loads(response_text)
-
-    result.setdefault("detections", [])
-    result.setdefault("actions", [])
-    result.setdefault("interventions", [])
-    result.setdefault("notify_sleep_agent", {
-        "should_notify": False,
-        "reason": "",
-        "payload": {}
-    })
-
-    return result
-    
-
-def run_sleep_recovery_agent(sleep_context: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Sleep + Recovery Agent.
-
-    Input: sleep_context (dict) with keys like:
-      - last_nights_sleep_duration_hours, sleep_interruptions,
-        average_sleep_duration_past_7_days_hours, sleep_debt_hours,
-        hrv_ms, resting_hr_bpm, activity_level_today, circadian_phase,
-        current_time, recent_screen_behavior (dict)
-
-    Returns dict with keys:
-      - detections: List[str]
-      - actions: List[str]
-      - interventions: List[str]
-      - notify_screen_agent: Dict[str, Any]
-    """
-    sleep_context_json = json.dumps(sleep_context, ensure_ascii=False)
-
-    user_message = f"""
-
-
-    You are the Sleep + Recovery Agent in the AURA system.
-
-    Your job:
-
-    - Evaluate the user’s sleep and recovery state.
-
-    - Detect issues like fatigue risk, sleep debt, poor recovery, stress-related changes.
-
-    - Decide concrete actions to improve recovery and tomorrow’s energy.
-
-    - Coordinate with the Screen Behavior Agent when needed.
-
-    You receive the following JSON as input:
-
-    {sleep_context_json}
-
-
-    Detection goals:
-
-    - Predicted fatigue (e.g., short sleep duration + high sleep debt + low HRV).
-
-    - Poor recovery (e.g., increased resting HR, decreased HRV).
-
-    - Sleep debt buildup.
-
-    - Stress-related physiological changes.
-
-    Available actions (examples, choose any that fit):
-
-    - "RECOMMEND_EARLIER_BEDTIME"
-
-    - "TRIGGER_WIND_DOWN_ROUTINE"
-
-    - "SILENCE_NOTIFICATIONS"
-
-    - "ADJUST_ALARM_MINUS_20" (wake up 20 minutes later if possible)
-
-    - "SEND_DAY_STRUCTURE_SUGGESTIONS" (tips for pacing the next day)
-
-    - "NOTIFY_SCREEN_AGENT" (to reduce stimulating evening use)
-
-    - "NO_ACTION"
-
-    Interventions must sound human and supportive, e.g.:
-
-    - "Your recovery looks a bit low today. Going to bed 30 minutes earlier could really help."
-
-    - "Sleep debt has built up over the last few days. I’ll keep evenings a bit calmer for you."
-
-    You must respond with a single JSON object and nothing else.
-    Do NOT include any explanations, descriptions, text outside JSON.
-    Do NOT include comments or trailing commas.
-    Use this exact schema:
-
-    {{
-      "detections": [ "string" ],
-      "actions": [ "string" ],
-      "interventions": [ "string" ],
-      "notify_screen_agent": {{
-        "should_notify": true or false,
-        "reason": "string",
-        "payload": {{}}
-      }}
-    }}
-
-
-    Rules:
-
-    If no issue is detected, use "detections": [], "actions": ["NO_ACTION"].
-
-    If you want Screen Agent to calm down late-night usage, set "should_notify" to true
-    and include a small "payload" with what you’d like it to do (e.g., lower stimulation before midnight).
-    """
-
-    response_text = call_bedrock_converse(user_message)
-    result = safe_json_loads(response_text)
-
-    # Make sure all expected keys exist
-
-    result.setdefault("detections", [])
-    result.setdefault("actions", [])
-    result.setdefault("interventions", [])
-    result.setdefault("notify_screen_agent", {
-        "should_notify": False,
-        "reason": "",
-        "payload": {}
-    })
-
-    return result
-
-
-def compute_aura_points(aura_input: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Aura Points Calculator.
-
-    Input: aura_input (dict) with keys like:
-      - sleep: {duration_hours, sleep_debt_hours, interruptions, quality_score}
-      - recovery: {hrv_ms, resting_hr_bpm}
-      - screen: {total_minutes, doomscrolling_events, long_sessions_over_20_min, late_night_minutes_after_23}
-      - activity: {steps, workout_minutes}
-
-    Returns dict with keys:
-      - aura_score: int (0-100)
-      - subscores: {sleep, recovery, screen_hygiene, activity} each int 0-100
-      - level: str
-      - badges_earned: List[str]
-      - message: str
-    """
-    aura_input_json = json.dumps(aura_input, ensure_ascii=False)
-
-    user_message = f"""
-
-
-    You are the Aura Points Calculator for the AURA system.
-
-    Your job:
-
-    - Take the user’s daily metrics.
-
-    - Compute a daily aura_score from 0–100 (higher is better).
-
-    - Provide subscores for sleep, recovery, screen_hygiene, and activity.
-
-    - Optionally assign a "level" (e.g. "Recovering", "Balanced", "Thriving").
-
-    - Optionally assign some badges (e.g. "Screen Break Hero", "Solid Sleeper").
-
-    - Generate one short, kind summary message explaining the score.
-
-    You receive the following JSON as input:
-
-    {aura_input_json}
-
-
-    Guidelines:
-
-    - A good day with decent sleep, moderate screen use, and some activity should land around 70–85.
-
-    - A very tough day (poor sleep + doomscrolling + low activity) might be 30–50.
-
-    - Never shame the user; always be encouraging and focus on next steps.
-
-    You must respond with a single JSON object and nothing else.
-    Do NOT include any explanations, descriptions, text outside JSON.
-    Do NOT include comments or trailing commas.
-    Use exactly this schema:
-
-    {{
-      "aura_score": 0,
-      "subscores": {{
-        "sleep": 0,
-        "recovery": 0,
-        "screen_hygiene": 0,
-        "activity": 0
-      }},
-      "level": "string",
-      "badges_earned": [ "string" ],
-      "message": "string"
-    }}
-
-
-    Rules:
-
-    - All scores are integers in [0, 100].
-
-    - "badges_earned" can be an empty list if nothing special happened.
-
-    - "message" should be 1–2 sentences, supportive and specific.
-    """
-
-    response_text = call_bedrock_converse(user_message, temperature=0.3)
     result = safe_json_loads(response_text)
 
     # Ensure all keys exist with defaults
+    result.setdefault("notification_title", "")
+    result.setdefault("notification_description", "")
+    result.setdefault("write_therapist_mail", False)
+    result.setdefault("therapist_mail_address", "")
+    result.setdefault("therapist_mail_title", "")
+    result.setdefault("therapist_mail_content", "")
 
-    result.setdefault("aura_score", 0)
-    result.setdefault("subscores", {
-        "sleep": 0,
-        "recovery": 0,
-        "screen_hygiene": 0,
-        "activity": 0,
-    })
-    result.setdefault("level", "Unknown")
-    result.setdefault("badges_earned", [])
-    result.setdefault("message", "")
+    # If we're not writing an email, clear all therapist fields
+    if not bool(result.get("write_therapist_mail")):
+        result["write_therapist_mail"] = False
+        result["therapist_mail_address"] = ""
+        result["therapist_mail_title"] = ""
+        result["therapist_mail_content"] = ""
 
     return result
-    
 
-def demo_screen_agent() -> None:
-    # Example input 
-    screen_context = {
-        "time_of_day": "23:17",
-        "weekday": "Monday",
-        "total_screen_time_minutes": 185,
-        "session_length_minutes": 27,
-        "app_usage": {
-            "instagram": 73,
-            "tiktok": 54,
-            "youtube": 28,
-            "other": 30
-        },
-        "scroll_velocity": "high",  # "low" | "medium" | "high" | None
-        "mood_self_report": "tired",  # or None
-        "recent_social_interaction_flag": True
-    }
+# ---------------------------------------------------------------------
+# (Optional) in-memory history helper
+# ---------------------------------------------------------------------
 
-    result = run_screen_behavior_agent(screen_context)
-    print("=== Screen Behavior Agent ===")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+def update_history(
+    history: List[Dict[str, Any]],
+    new_output: Dict[str, Any],
+    max_len: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    Append new_output to history and keep only the last `max_len` entries.
+    """
+    history = (history or []) + [new_output]
+    return history[-max_len:]
 
+# ---------------------------------------------------------------------
+# DB-integrated helper: run agent for a given user_id
+# ---------------------------------------------------------------------
 
-def demo_sleep_agent() -> None:
-    sleep_context = {
-        "last_nights_sleep_duration_hours": 5.3,
-        "sleep_interruptions": 3,
-        "average_sleep_duration_past_7_days_hours": 6.2,
-        "sleep_debt_hours": 6.0,
-        "hrv_ms": 48,
-        "resting_hr_bpm": 72,
-        "activity_level_today": "low",  # "low" | "medium" | "high"
-        "circadian_phase": "late_evening",
-        "current_time": "22:45",
-        "recent_screen_behavior": {
-            "doomscrolling_detected": True,
-            "late_night_use_minutes": 45
+def run_aura_for_user(user_id: int) -> Dict[str, Any]:
+    """
+    High-level helper:
+    - Loads today's DailyMetrics for the user (assuming they are already written),
+    - Loads last 10 AuraAgentOutput rows as history,
+    - Calls the AURA agent,
+    - Stores a *redacted* version of the output in the database (no therapist info),
+    - Returns the full agent output (including therapist mail data) to the caller.
+    """
+    import datetime
+
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter_by(user_id=user_id).one()
+
+        today = datetime.date.today()
+
+        metrics = (
+            session.query(DailyMetrics)
+            .filter_by(user_id=user_id, day=today)
+            .one_or_none()
+        )
+
+        if metrics is None:
+            logging.warning(
+                "No DailyMetrics found for user %s on %s, creating empty row.",
+                user_id,
+                today,
+            )
+            metrics = DailyMetrics(
+                user_id=user_id,
+                day=today,
+                last_nights_sleep_duration_hours=None,
+                resting_hr_bpm=None,
+                total_screen_minutes=None,
+                steps=None,
+                long_sessions_over_20_min=None,
+            )
+            session.add(metrics)
+            session.commit()
+
+        # Load last 10 outputs (oldest first)
+        past_outputs = (
+            session.query(AuraAgentOutput)
+            .filter_by(user_id=user_id)
+            .order_by(AuraAgentOutput.created_at.asc())
+            .limit(10)
+            .all()
+        )
+        history = [row.output for row in past_outputs]
+
+        current_context = {
+            "last_nights_sleep_duration_hours": metrics.last_nights_sleep_duration_hours,
+            "resting_hr_bpm": metrics.resting_hr_bpm,
+            "total_screen_minutes": metrics.total_screen_minutes,
+            "steps": metrics.steps,
+            "long_sessions_over_20_min": metrics.long_sessions_over_20_min,
+            "residence_location": user.residence_location,
         }
-    }
 
-    result = run_sleep_recovery_agent(sleep_context)
-    print("=== Sleep + Recovery Agent ===")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+        agent_output = run_aura_agent(current_context, history)
 
+        # REDACT therapist info before storing in DB
+        stored_output = dict(agent_output)
+        if stored_output.get("write_therapist_mail"):
+            stored_output["therapist_mail_address"] = ""
+            stored_output["therapist_mail_title"] = ""
+            stored_output["therapist_mail_content"] = ""
 
-def demo_aura_points() -> None:
-    aura_input = {
-        "day": "2025-11-22",
-        "sleep": {
-            "duration_hours": 6.5,
-            "sleep_debt_hours": 3.5,
-            "interruptions": 1,
-            "quality_score": 72
-        },
-        "recovery": {
-            "hrv_ms": 55,
-            "resting_hr_bpm": 62
-        },
-        "screen": {
-            "total_minutes": 210,
-            "doomscrolling_events": 1,
-            "long_sessions_over_20_min": 2,
-            "late_night_minutes_after_23": 35
-        },
-        "activity": {
-            "steps": 8200,
-            "workout_minutes": 25
-        }
-    }
+        new_row = AuraAgentOutput(
+            user_id=user.user_id,
+            output=stored_output,
+        )
+        session.add(new_row)
+        session.commit()
 
-    result = compute_aura_points(aura_input)
-    print("=== Aura Points ===")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+        # We return the full output so the caller can actually send the email / show notification.
+        return agent_output
 
+    finally:
+        session.close()
+
+# ---------------------------------------------------------------------
+# Simple demo (assumes a user with user_id=1 exists and has metrics)
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    demo_screen_agent()
-    demo_sleep_agent()
-    demo_aura_points()
+    try:
+        output = run_aura_for_user(user_id=1)
+        print("=== AURA Agent Output ===")
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    except Exception as e:
+        logging.error("Demo failed: %s", e)
