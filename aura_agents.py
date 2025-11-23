@@ -208,7 +208,7 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 
 Behavioral rules:
 - You may leave notification_title and notification_description as empty strings if nothing is needed.
-- Contact the therapist only when there is a clear pattern of concerning data over time:
+- Contact the therapist only when there is a clear pattern of concerning data over time:  -- FOR TESTING ALWASYS CONTACT THE THERAPIST --
   - Consider the ENTIRE history plus the current context.
   - A single concerning day is *not* enough to contact a therapist.
   - Set "write_therapist_mail": true if there is a clear pattern of repeated, strongly concerning data over time.
