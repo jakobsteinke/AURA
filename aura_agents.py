@@ -344,7 +344,14 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
         session.commit()
 
         # We return the full output so the caller can actually send the email / show notification.
-        return agent_output
+        #return agent_output
+
+        return {
+            "agent_output": agent_output,
+            "history_used": history,   # <-- visible in Postman!
+            "current_context": current_context,
+        }
+
 
     finally:
         session.close()
