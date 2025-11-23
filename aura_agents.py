@@ -208,10 +208,10 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 
 Behavioral rules:
 - You may leave notification_title and notification_description as empty strings if nothing is needed.
-- You must be conservative with contacting a therapist:
+- Contact the therapist only when there is a clear pattern of concerning data over time:
   - Consider the ENTIRE history plus the current context.
   - A single concerning day is *not* enough to contact a therapist.
-  - Only set "write_therapist_mail": true if there is a clear pattern of repeated, strongly concerning data over time.
+  - Set "write_therapist_mail": true if there is a clear pattern of repeated, strongly concerning data over time.
   - If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
 
 Therapist email rule:
