@@ -14,7 +14,7 @@ from db_models import User, DailyMetrics, AuraAgentOutput
 # Config & Bedrock client
 # ---------------------------------------------------------------------
 
-MODEL_ID = "eu.anthropic.gpt-5-mini-v1:0"
+MODEL_ID = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
 logging.basicConfig(level=logging.INFO)
 
