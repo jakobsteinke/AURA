@@ -6,3 +6,4 @@ jmespath
 s3transfer
 
 python-dotenv
+sqlalchemy
