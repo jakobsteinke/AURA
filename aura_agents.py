@@ -36,12 +36,18 @@ def call_bedrock_converse(
     user_message: str,
     model_id: str = MODEL_ID,
     max_tokens: int = 512,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
+    temperature: Optional[float] = 0.7,
+    top_p: Optional[float] = None,
 ) -> str:
     """
     Send a single user message to Bedrock using the 'converse' API
     and return the raw response text.
+
+    NOTE:
+    - For some models (incl. this Anthropic one), `temperature` and `top_p`
+      CANNOT both be set at the same time.
+    - By default we only use `temperature`. If you explicitly set `top_p`,
+      set `temperature=None` when calling this function.
     """
     conversation = [
         {
@@ -50,14 +56,24 @@ def call_bedrock_converse(
         }
     ]
 
+    # Build inferenceConfig so that we NEVER send both temperature and topP
+    inference_config: Dict[str, Any] = {"maxTokens": max_tokens}
+
+    if temperature is not None and top_p is None:
+        inference_config["temperature"] = temperature
+    elif top_p is not None and temperature is None:
+        inference_config["topP"] = top_p
+    else:
+        # If both are set or both are None, default to temperature if available
+        if temperature is not None:
+            inference_config["temperature"] = temperature
+        elif top_p is not None:
+            inference_config["topP"] = top_p
+
     response = brt.converse(
         modelId=model_id,
         messages=conversation,
-        inferenceConfig={
-            "maxTokens": max_tokens,
-            "temperature": temperature,
-            "topP": top_p,
-        },
+        inferenceConfig=inference_config,
     )
 
     response_text = response["output"]["message"]["content"][0]["text"]
@@ -434,4 +450,3 @@ if __name__ == "__main__":
         print(json.dumps(output, indent=2, ensure_ascii=False))
     except Exception as e:
         logging.error("Demo failed: %s", e)
-
