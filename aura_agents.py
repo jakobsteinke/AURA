@@ -145,8 +145,13 @@ def run_aura_agent(
       - long_sessions_over_20_min: int | None
       - residence_location: str | None (e.g. "Munich, Germany")
 
-    history: list of the last up to 10 previous agent outputs (oldest first).
-             Each element is expected to be a dict with the same output schema.
+    history: list (oldest first) of up to 10 previous agent calls.
+             Each element has the form:
+             {
+               "created_at": "... ISO timestamp ...",
+               "context": {... metrics at that time ...},
+               "agent_output": {... stored_output ...}
+             }
 
     Output: dict with keys (any may be empty strings / False):
       - notification_title: str
@@ -164,8 +169,6 @@ def run_aura_agent(
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
 
-    print(history)
-
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
@@ -173,7 +176,13 @@ You receive:
 1. The current daily context as JSON:
 {current_context_json}
 
-2. The history of your last outputs (oldest first, up to 10 entries):
+2. The history of your last outputs (oldest first, up to 10 entries).
+   Each entry has this shape:
+   {{
+     "created_at": "... ISO timestamp ...",
+     "context": {{ ...metrics at that time... }},
+     "agent_output": {{ ...your previous decision... }}
+   }}:
 {history_json}
 
 Your goals:
@@ -255,12 +264,28 @@ Use exactly this schema:
 def update_history(
     history: List[Dict[str, Any]],
     new_output: Dict[str, Any],
+    new_context: Dict[str, Any],
+    created_at: Optional[str] = None,
     max_len: int = 10,
 ) -> List[Dict[str, Any]]:
     """
-    Append new_output to history and keep only the last `max_len` entries.
+    Append a new history entry and keep only the last `max_len` entries.
+
+    new_output: agent_output dict
+    new_context: context dict at that time
+    created_at: ISO timestamp string (if None, use 'now' in UTC ISO format)
     """
-    history = (history or []) + [new_output]
+    if created_at is None:
+        import datetime as _dt
+        created_at = _dt.datetime.utcnow().isoformat()
+
+    entry = {
+        "created_at": created_at,
+        "context": new_context,
+        "agent_output": new_output,
+    }
+
+    history = (history or []) + [entry]
     return history[-max_len:]
 
 # ---------------------------------------------------------------------
@@ -271,7 +296,7 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
     """
     High-level helper:
     - Loads today's DailyMetrics for the user (assuming they are already written),
-    - Loads last 10 AuraAgentOutput rows as history,
+    - Loads last 10 AuraAgentOutput rows as history (including context snapshots),
     - Calls the AURA agent,
     - Stores a *redacted* version of the output in the database (no therapist info),
     - Returns the full agent output (including therapist mail data) to the caller.
@@ -308,7 +333,7 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
             session.add(metrics)
             session.commit()
 
-        # Load last 10 outputs (oldest first)
+        # Load last 10 outputs (oldest first), including context snapshots
         past_outputs = (
             session.query(AuraAgentOutput)
             .filter_by(user_id=user_id)
@@ -316,7 +341,16 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
             .limit(10)
             .all()
         )
-        history = [row.output for row in past_outputs]
+
+        history: List[Dict[str, Any]] = []
+        for row in past_outputs:
+            history.append(
+                {
+                    "created_at": row.created_at.isoformat(),
+                    "context": row.context or {},
+                    "agent_output": row.output or {},
+                }
+            )
 
         current_context = {
             "last_nights_sleep_duration_hours": metrics.last_nights_sleep_duration_hours,
@@ -339,19 +373,16 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
         new_row = AuraAgentOutput(
             user_id=user.user_id,
             output=stored_output,
+            context=current_context,  # store snapshot of metrics at this advice time
         )
         session.add(new_row)
         session.commit()
 
-        # We return the full output so the caller can actually send the email / show notification.
-        #return agent_output
-
         return {
             "agent_output": agent_output,
-            "history_used": history,   # <-- visible in Postman!
+            "history_used": history,       # used as input to the LLM
             "current_context": current_context,
         }
-
 
     finally:
         session.close()

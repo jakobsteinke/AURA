@@ -1,6 +1,7 @@
 # inspect_db.py
 from db import SessionLocal
-from db_models import User, DailyMetrics
+from db_models import User, DailyMetrics, AuraAgentOutput
+
 
 def show_users():
     session = SessionLocal()
@@ -15,6 +16,7 @@ def show_users():
             )
     finally:
         session.close()
+
 
 def show_metrics(user_id: int):
     session = SessionLocal()
@@ -32,8 +34,31 @@ def show_metrics(user_id: int):
     finally:
         session.close()
 
+
+def show_aura_outputs(user_id: int):
+    """Inspect stored AURA agent outputs including the context snapshot."""
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(AuraAgentOutput)
+            .filter_by(user_id=user_id)
+            .order_by(AuraAgentOutput.created_at.asc())
+            .all()
+        )
+        for r in rows:
+            print("---- AuraAgentOutput id:", r.id)
+            print(" created_at:", r.created_at)
+            print(" context:", r.context)
+            print(" output:", r.output)
+            print()
+    finally:
+        session.close()
+
+
 if __name__ == "__main__":
     print("=== Users ===")
     show_users()
     print("=== Metrics for user 1 ===")
     show_metrics(1)
+    print("=== Aura outputs for user 1 ===")
+    show_aura_outputs(1)

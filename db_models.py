@@ -9,6 +9,7 @@ import datetime
 
 Base = declarative_base()
 
+
 class User(Base):
     __tablename__ = "users"
 
@@ -16,7 +17,7 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     timezone = Column(String, nullable=True)
 
-    # NEW: residence location of user (not dynamic GPS)
+    # residence location of user (not dynamic GPS)
     # e.g. "Munich, Germany" or "Darmstadt, Germany"
     residence_location = Column(String, nullable=True)
 
@@ -80,7 +81,10 @@ class AuraAgentOutput(Base):
     user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
 
-    # We will store a *redacted* version of the LLM output here (no therapist email).
+    # Redacted version of the LLM output (no therapist email fields)
     output = Column(JSON, nullable=False)
+
+    # NEW: snapshot of the context/metrics at the time this advice was generated
+    context = Column(JSON, nullable=True)
 
     user = relationship("User", back_populates="aura_outputs")
