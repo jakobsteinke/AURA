@@ -198,20 +198,9 @@ Input fields (may be missing or null):
 - long_sessions_over_20_min
 - residence_location
 
-IMPORTANT: How to use history
-- Look at the 5 most recent days: the last up to 4 entries from the history (newest first) plus the current context.
-- For each of these days, decide whether it is CONCERNING.
-- A day is CONCERNING if ANY of these hold:
-  - last_nights_sleep_duration_hours is not null AND < 3 hours
-  - steps is not null AND < 2000
-  - total_screen_minutes is not null AND > 360 (more than 6 hours)
-  - long_sessions_over_20_min is not null AND >= 10
-- If there are at least 3 CONCERNING days in this 5-day window, you MUST treat this as a clear repeated concerning pattern.
-
 IMPORTANT: Therapist decision
-- "write_therapist_mail" must be true if you detect a clear repeated concerning pattern (3 or more CONCERNING days in the last 5).
-- It may also be true if today is obviously an extreme crisis, even without 3 days.
-- Otherwise, keep "write_therapist_mail" false.
+- "write_therapist_mail" must be true if you detect slighlty concerning data.
+- If everything looks fine, keep "write_therapist_mail" false.
 - When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
 - When "write_therapist_mail" is false, those three fields MUST be empty strings.
 
