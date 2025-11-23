@@ -30,67 +30,6 @@ brt = boto3.client(
 )
 
 # ---------------------------------------------------------------------
-# JSON helper
-# ---------------------------------------------------------------------
-
-def safe_json_loads(text: str) -> Dict[str, Any]:
-    """
-    Safely parse JSON from model output.
-
-    - Strips markdown fences and whitespace.
-    - Keeps only the substring from first '{' to last '}'.
-    - Tries json.loads; if it fails, auto-closes up to 3 missing '}'.
-    - Returns {} on failure.
-    """
-    if not text:
-        return {}
-
-    cleaned = text.strip()
-
-    # Strip ```json fences if present
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-        cleaned = cleaned.strip()
-
-    first = cleaned.find("{")
-    last = cleaned.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        logging.error("No JSON object found in model output: %r", text)
-        return {}
-
-    candidate = cleaned[first:last + 1]
-
-    try:
-        obj = json.loads(candidate)
-    except json.JSONDecodeError:
-        open_count = candidate.count("{")
-        close_count = candidate.count("}")
-        max_extra_braces = 3
-        obj = None
-
-        for _ in range(max_extra_braces):
-            if close_count >= open_count:
-                break
-            candidate += "}"
-            close_count += 1
-            try:
-                obj = json.loads(candidate)
-                break
-            except json.JSONDecodeError:
-                obj = None
-
-        if obj is None:
-            logging.error("Failed to parse model JSON even after repair; raw=%r", text)
-            return {}
-
-    if not isinstance(obj, dict):
-        logging.error("Parsed JSON is not an object: %r", obj)
-        return {}
-
-    return obj
-
-# ---------------------------------------------------------------------
 # Bedrock wrapper
 # ---------------------------------------------------------------------
 
@@ -169,6 +108,39 @@ def run_aura_agent(
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
 
+    # Few-shot examples of VALID outputs for the model
+    examples = r"""
+Example 1 (everything fine, no notification, no therapist):
+{
+  "notification_title": "",
+  "notification_description": "",
+  "write_therapist_mail": false,
+  "therapist_mail_address": "",
+  "therapist_mail_title": "",
+  "therapist_mail_content": ""
+}
+
+Example 2 (mildly concerning day, notification only):
+{
+  "notification_title": "Gentle reminder to rest",
+  "notification_description": "You slept only 4.0 hours last night and spent a lot of time on screens. Try to take a short break and wind down a bit earlier today.",
+  "write_therapist_mail": false,
+  "therapist_mail_address": "",
+  "therapist_mail_title": "",
+  "therapist_mail_content": ""
+}
+
+Example 3 (repeated concerning pattern, suggest therapist):
+{
+  "notification_title": "Consider getting extra support",
+  "notification_description": "Your recent days show very little sleep and high screen time. It might help to talk to a professional about how you’re feeling.",
+  "write_therapist_mail": true,
+  "therapist_mail_address": "info@psychotherapie-muenchen.de",
+  "therapist_mail_title": "Request for an initial consultation",
+  "therapist_mail_content": "Dear therapist,\n\nI have been experiencing poor sleep and high stress for several days in a row. I would like to ask for an initial consultation to discuss my situation and possible next steps.\n\nKind regards,\nA concerned patient"
+}
+"""
+
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
@@ -198,8 +170,11 @@ Input fields (may be missing or null):
 - long_sessions_over_20_min: number of long screen sessions (> 20 minutes) today.
 - residence_location: the city and country where the user lives.
 
+Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT copy them literally, adapt to the current data):
+{examples}
+
 IMPORTANT: Therapist decision
-- "write_therapist_mail" must be true if you detect slighlty concerning data.
+- "write_therapist_mail" must be true if you detect slighlty concerning data or a clear concerning pattern over several days.
 - If everything looks fine, keep "write_therapist_mail" false.
 - When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
 - When "write_therapist_mail" is false, those three fields MUST be empty strings.
@@ -218,7 +193,7 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 - "write_therapist_mail": boolean, true only if you think a therapist should be contacted (set it to true if the user repeatedly ignores your advice and does not improve over time)
 - "therapist_mail_address": email address of a therapist or mental health service near the residence_location when write_therapist_mail is true, else ""
 - "therapist_mail_title": subject line of the email that should be sent to the therapist (concise, can be "")
-- "therapist_mail_content": content of the email that shoul be sent to the therapist (can be "")
+- "therapist_mail_content": content of the email that should be sent to the therapist (can be "")
 
 Behavioral rules:
 - You may leave notification_title and notification_description as empty strings if nothing is needed.
@@ -235,23 +210,23 @@ Tone guidelines:
 - Notifications should be supportive and non-judgmental.
 - Focus on small, realistic next steps (e.g. "take a short walk", "wind down for sleep", "reduce screen time slightly").
 
-Output format:
-You must respond with a single JSON object and nothing else.
-DO NOT include any explanations, comments, or text outside JSON.
-Use exactly this schema:
-
-{{
-  "notification_title": "string",
-  "notification_description": "string",
-  "write_therapist_mail": boolean,
-  "therapist_mail_address": "string",
-  "therapist_mail_title": "string",
-  "therapist_mail_content": "string"
-}}
+Output format (VERY IMPORTANT):
+- You MUST respond with a single valid JSON object.
+- Do NOT wrap it in markdown fences.
+- Do NOT add any text before or after the JSON.
+- The JSON MUST have exactly these keys:
+  "notification_title", "notification_description", "write_therapist_mail",
+  "therapist_mail_address", "therapist_mail_title", "therapist_mail_content".
 """
 
     response_text = call_bedrock_converse(user_message)
-    result = safe_json_loads(response_text)
+
+    # Simple JSON parsing using the few-shot guidance
+    try:
+        result = json.loads(response_text)
+    except json.JSONDecodeError:
+        logging.error("Failed to parse model JSON: %r", response_text)
+        result = {}
 
     # Ensure all keys exist with defaults
     result.setdefault("notification_title", "")
