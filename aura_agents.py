@@ -68,15 +68,6 @@ def call_bedrock_converse(
 # Single AURA Agent (LLM logic only)
 # ---------------------------------------------------------------------
 
-def _fmt(value: Any) -> str:
-    """Human-readable formatting for context fields."""
-    if value is None:
-        return "unknown"
-    return str(value)
-
-def _bool(value: Any) -> str:
-    return "yes" if bool(value) else "no"
-
 def run_aura_agent(
     current_context: Dict[str, Any],
     history: Optional[List[Dict[str, Any]]] = None,
@@ -93,6 +84,12 @@ def run_aura_agent(
       - residence_location: str | None (e.g. "Munich, Germany")
 
     history: list (oldest first) of up to 10 previous agent calls.
+             Each element has the form:
+             {
+               "created_at": "... ISO timestamp ...",
+               "context": {... metrics at that time ...},
+               "agent_output": {... stored_output ...}
+             }
 
     Output JSON keys:
       - notification_title: str
@@ -105,60 +102,24 @@ def run_aura_agent(
     if history is None:
         history = []
 
-    history = history[-10:]  # only last 10 entries
+    # Only last 10 entries for sanity
+    history = history[-10:]
 
-    # JSON versions for precision
-    current_context_json = json.dumps(current_context, ensure_ascii=False, indent=2)
-    history_json = json.dumps(history, ensure_ascii=False, indent=2)
+    current_context_json = json.dumps(current_context, ensure_ascii=False)
+    history_json = json.dumps(history, ensure_ascii=False)
 
-    # -----------------------------------------------------------------
-    # Human-readable explanation of current context
-    # -----------------------------------------------------------------
-    cc = current_context or {}
-    current_context_readable = f"""
-CURRENT DAY (most recent data)
-- Sleep last night (hours): {_fmt(cc.get("last_nights_sleep_duration_hours"))}
-  (This is the TOTAL time slept, not how much is missing.)
-- Resting heart rate (bpm): {_fmt(cc.get("resting_hr_bpm"))}
-- Total screen time today (minutes): {_fmt(cc.get("total_screen_minutes"))}
-- Steps today: {_fmt(cc.get("steps"))}
-- Long screen sessions over 20 minutes today: {_fmt(cc.get("long_sessions_over_20_min"))}
-- Residence location (city, country): {_fmt(cc.get("residence_location"))}
-""".strip()
-
-    # -----------------------------------------------------------------
-    # Human-readable explanation of history
-    # -----------------------------------------------------------------
-    history_lines: List[str] = []
-    if history:
-        history_lines.append("HISTORY OF PREVIOUS AGENT CALLS (oldest first):")
-        for idx, h in enumerate(history, start=1):
-            ctx = h.get("context") or {}
-            out = h.get("agent_output") or {}
-            created = _fmt(h.get("created_at"))
-            history_lines.append(
-                f"""
-Entry #{idx}
-- Timestamp: {created}
-- Sleep that night (hours): {_fmt(ctx.get("last_nights_sleep_duration_hours"))}
-- Resting heart rate (bpm): {_fmt(ctx.get("resting_hr_bpm"))}
-- Total screen time that day (minutes): {_fmt(ctx.get("total_screen_minutes"))}
-- Steps that day: {_fmt(ctx.get("steps"))}
-- Long screen sessions that day: {_fmt(ctx.get("long_sessions_over_20_min"))}
-- Residence location: {_fmt(ctx.get("residence_location"))}
-- Previous notification title: {_fmt(out.get("notification_title"))}
-- Previous notification description: {_fmt(out.get("notification_description"))}
-- Previously suggested contacting a therapist?: {_bool(out.get("write_therapist_mail"))}
-"""
-            )
+    # Simple deterministic style seed → more variety but reproducible
+    style_index = len(history) % 4
+    if style_index == 0:
+        style_profile = "warm and encouraging coach, focusing on gentle suggestions."
+    elif style_index == 1:
+        style_profile = "calm and factual observer, focusing on clear, neutral wording."
+    elif style_index == 2:
+        style_profile = "gentle but slightly more firm reminder, emphasizing follow-through."
     else:
-        history_lines.append("No previous history entries are available for this user.")
+        style_profile = "practical guide, suggesting 1–2 concrete next steps."
 
-    history_readable = "\n".join(history_lines)
-
-    # -----------------------------------------------------------------
-    # Examples (no hard-coded thresholds, but concrete JSON structure)
-    # -----------------------------------------------------------------
+    # Examples deliberately avoid specific numeric values to reduce copying
     examples = r"""
 Example 1 (everything fine, no notification, no therapist):
 {
@@ -191,79 +152,128 @@ Example 3 (repeated concerning pattern, suggest therapist):
 }
 """
 
-    # -----------------------------------------------------------------
-    # Prompt to LLM
-    # -----------------------------------------------------------------
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
-You receive TWO views of the data:
-
-1) A HUMAN-READABLE EXPLANATION of the current context and history:
-
-{current_context_readable}
-
-{history_readable}
-
-2) The SAME INFORMATION in RAW JSON form for exact numeric values:
-
-CURRENT_CONTEXT_JSON:
+You receive:
+1. The CURRENT daily context as JSON:
 {current_context_json}
 
-HISTORY_JSON:
+2. The HISTORY of your last outputs (oldest first, up to 10 entries).
+   Each entry has this shape:
+   {{
+     "created_at": "... ISO timestamp ...",
+     "context": {{ ...metrics at that time... }},
+     "agent_output": {{ ...your previous decision... }}
+   }}:
 {history_json}
 
 Your goals:
 - Decide whether to show the user a notification right now.
 - If so, make the notification short, specific, and caring.
-- Very rarely, decide whether to suggest contacting a therapist via email.
+- Only when clearly justified, suggest contacting a therapist via email.
 
-Semantics of the input fields:
-- last_nights_sleep_duration_hours: TOTAL number of hours the user actually slept last night
-  (for example 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short).
-- resting_hr_bpm: the user's resting heart rate in beats per minute.
-- total_screen_minutes: total minutes spent on screens today.
-- steps: total steps walked today.
-- long_sessions_over_20_min: number of long screen sessions (> 20 minutes) today.
-- residence_location: the city and country where the user lives.
+STYLE PROFILE FOR THIS RESPONSE:
+- For this response, write like a {style_profile}
 
-Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT copy them literally, adapt to the current data):
-{examples}
+------------------- INPUT FIELD SEMANTICS -------------------
+Input fields (may be missing or null):
+- last_nights_sleep_duration_hours:
+    TOTAL number of hours the user actually slept last night.
+    Example: 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short.
+- resting_hr_bpm:
+    The user's resting heart rate in beats per minute.
+- total_screen_minutes:
+    Total minutes spent on screens today.
+- steps:
+    Total steps walked today.
+- long_sessions_over_20_min:
+    Number of long screen sessions (> 20 minutes) today.
+- residence_location:
+    The city and country where the user lives.
 
-STRICT RULES ABOUT NUMBERS (VERY IMPORTANT):
+------------------- RISK CLASSIFICATION RULES -------------------
+MENTALLY, classify days like this (do NOT output the labels, just use them internally):
+
+A day is SEVERE if ANY of these hold:
+- last_nights_sleep_duration_hours is not null AND < 2.0
+- steps is not null AND < 500
+- total_screen_minutes is not null AND > 720
+- long_sessions_over_20_min is not null AND >= 20
+
+A day is CONCERNING (but not necessarily SEVERE) if ANY of these hold:
+- last_nights_sleep_duration_hours is not null AND < 4.0
+- steps is not null AND < 2000
+- total_screen_minutes is not null AND > 480
+- long_sessions_over_20_min is not null AND >= 12
+
+Otherwise the day is OK.
+
+Look at the 5 most recent days: up to the last 4 entries from the history (newest first) plus the current day.
+
+------------------- THERAPIST DECISION LOGIC -------------------
+Use the following logic for write_therapist_mail:
+
+- Let window_5 be the last 5 days (up to 4 history entries + current day).
+- Count how many days in window_5 are SEVERE and how many are CONCERNING.
+
+Set write_therapist_mail = true if ANY of these are true:
+1) There are at least 3 days that are CONCERNING or SEVERE in window_5.
+2) There are at least 2 SEVERE days in window_5.
+3) Today is SEVERE AND there is at least 1 other CONCERNING or SEVERE day in window_5.
+
+Otherwise set write_therapist_mail = false.
+
+When write_therapist_mail is true:
+- You MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
+- therapist_mail_content should be a short, respectful email body that the user could send.
+
+When write_therapist_mail is false:
+- therapist_mail_address, therapist_mail_title, therapist_mail_content MUST be empty strings.
+
+------------------- STRICT RULES ABOUT NUMBERS -------------------
+THIS IS VERY IMPORTANT:
+
 - You MUST NOT invent any numeric values (hours, minutes, steps, heart rate, counts).
 - If you mention a concrete number (like hours of sleep, minutes on screen, or steps),
   it MUST come directly from the CURRENT context or from a specific day in the HISTORY.
-- If you mention last_nights_sleep_duration_hours, you MUST use exactly the numeric value
-  from current_context["last_nights_sleep_duration_hours"].
-- You MUST NOT write phrases like "X hours too short" because the required baseline
+- If you mention last_nights_sleep_duration_hours in the CURRENT day, you MUST use exactly
+  the numeric value from current_context["last_nights_sleep_duration_hours"].
+- You MUST NOT write phrases like "X hours too short" because the required baseline sleep
   (how many hours the user needs) is NOT provided.
 - If a field is null or missing, you MUST NOT invent a numeric value for it.
-  In that case, speak qualitatively (e.g., "less sleep than usual") or avoid mentioning numbers.
+  In that case, speak qualitatively (e.g., "less sleep than usual" if history supports it)
+  or avoid mentioning numbers at all.
 
-IMPORTANT: Therapist decision
-- "write_therapist_mail" must be true if you detect clearly concerning data or a clear concerning pattern over several days.
-- If everything looks fine, keep "write_therapist_mail" false.
-- When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
-- When "write_therapist_mail" is false, those three fields MUST be empty strings.
-
-IMPORTANT: Do not repeat yourself
+------------------- VARIETY & NON-REPETITION -------------------
 - Read all previous "agent_output" objects in the history, especially:
-  - notification_title
-  - notification_description
-- You MUST NOT return exactly the same notification_title and notification_description as any previous history entry.
-- If your best advice is similar to something you said before, you MUST rephrase it and/or make it slightly more specific or escalated.
-- Over time, as the pattern continues without improvement, your wording should reflect increasing urgency and care (while still being supportive and non-judgmental).
+    - notification_title
+    - notification_description
+- You MUST NOT return exactly the same notification_title and notification_description
+  as any previous history entry.
+- Avoid repeating short generic phrases like "Consider getting extra support" over and over:
+  rephrase them or give slightly more specific guidance.
+- If your best advice is similar to something you said before, rephrase it and/or make it
+  more specific, or slightly escalated (for example, add a concrete next step or timing).
+- Over time, as the pattern continues without improvement, your wording should reflect
+  increasing urgency and care (while still being supportive and non-judgmental).
 
-Output fields and meaning (you MUST always include all keys in the JSON object):
-- "notification_title": short title for a popup notification to the user (can be empty string "" if no notification is needed)
-- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "" if no notification is needed)
+------------------- OUTPUT SCHEMA -------------------
+You MUST return exactly one JSON object with ALL of these keys and NO other keys:
+
+- "notification_title": short title for a popup notification to the user
+    (can be empty string "" if no notification is needed)
+- "notification_description": 1–2 sentences suggesting what the user could do next
+    (can be empty "" if no notification is needed)
 - "write_therapist_mail": boolean
 - "therapist_mail_address": string
 - "therapist_mail_title": string
 - "therapist_mail_content": string
 
-STRICT OUTPUT FORMAT (THIS IS CRITICAL):
+Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT copy them literally, adapt to the current data):
+{examples}
+
+------------------- STRICT OUTPUT FORMAT (CRITICAL) -------------------
 - You MUST produce exactly ONE JSON object for the CURRENT situation.
 - Your reply MUST start with the character '{{' as the very first character of the response.
 - Your reply MUST end with the matching '}}' of that JSON object.
@@ -274,11 +284,12 @@ STRICT OUTPUT FORMAT (THIS IS CRITICAL):
   "write_therapist_mail", "therapist_mail_address",
   "therapist_mail_title", "therapist_mail_content".
 
-Now, based ONLY on the CURRENT context and HISTORY, output that single JSON object.
+Now, think step by step silently (do NOT output your reasoning), then output that single JSON object.
 """
 
     response_text = call_bedrock_converse(user_message)
 
+    # Simple JSON parsing using the strict format instructions
     try:
         result = json.loads(response_text)
     except json.JSONDecodeError:
@@ -302,6 +313,9 @@ Now, based ONLY on the CURRENT context and HISTORY, output that single JSON obje
 
     return result
 
+# ---------------------------------------------------------------------
+# (Optional) in-memory history helper
+# ---------------------------------------------------------------------
 
 def update_history(
     history: List[Dict[str, Any]],
@@ -491,7 +505,6 @@ def run_aura_for_user(
 
 if __name__ == "__main__":
     try:
-        # Demo without override → uses DailyMetrics
         output = run_aura_for_user(user_id=1)
         print("=== AURA Agent Output ===")
         print(json.dumps(output, indent=2, ensure_ascii=False))
