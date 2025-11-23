@@ -164,6 +164,8 @@ def run_aura_agent(
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
 
+    print(history)
+
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 

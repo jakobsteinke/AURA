@@ -26,4 +26,4 @@ def create_user(
 
 if __name__ == "__main__":
     # adjust residence_location as needed
-    create_user("jakob@example.com", "Munich, Germany")
+    create_user("janina@example.com", "Munich, Germany")

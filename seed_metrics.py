@@ -35,10 +35,10 @@ def add_today_metrics(
 if __name__ == "__main__":
     # use the id printed from seed_user.py
     add_today_metrics(
-        user_id=1,
-        sleep_hours=6.5,
-        resting_hr=65,
-        screen_minutes=220,
-        steps=8000,
-        long_sessions=2,
+        user_id=3,
+        sleep_hours=0.5,
+        resting_hr=1,
+        screen_minutes=420,
+        steps=100,
+        long_sessions=20,
     )
