@@ -210,7 +210,7 @@ Behavioral rules:
 - You may leave notification_title and notification_description as empty strings if nothing is needed.
 - Consider the ENTIRE history plus the current context.
 - A single concerning day is *not* enough to contact a therapist, but do contact if there are multiple.
-- Set "write_therapist_mail": true if there is a clear pattern of repeated, concerning data over time.
+- Set "write_therapist_mail": true if there is a clear pattern of repeated, concerning data over time. Important: always set "write_therapist_mail" if the user showed concernig patterns for at least 3 out of the last 5 entries in history.
 - If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
 
 Therapist email rule:
