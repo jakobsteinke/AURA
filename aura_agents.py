@@ -302,14 +302,14 @@ def update_history(
 # ---------------------------------------------------------------------
 # DB-integrated helper: run agent for a given user_id
 # ---------------------------------------------------------------------
-
 def run_aura_for_user(user_id: int) -> Dict[str, Any]:
     """
     High-level helper:
     - Loads today's DailyMetrics for the user (assuming they are already written),
-    - Loads last 10 AuraAgentOutput rows as history (including context snapshots),
+    - Loads AuraAgentOutput rows as history (including context snapshots),
     - Calls the AURA agent,
-    - Stores a *redacted* version of the output in the database (no therapist info),
+    - Uses update_history() to append a new entry with +7 days,
+    - Stores only the last 10 outputs in the database,
     - Returns the full agent output (including therapist mail data) to the caller.
     """
     import datetime
@@ -344,18 +344,18 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
             session.add(metrics)
             session.commit()
 
-        # Load last 10 outputs (oldest first), including context snapshots
+        # 1) Load ALL existing outputs for this user (oldest first)
         past_outputs = (
             session.query(AuraAgentOutput)
             .filter_by(user_id=user_id)
             .order_by(AuraAgentOutput.created_at.asc())
-            .limit(10)
             .all()
         )
 
-        history: List[Dict[str, Any]] = []
+        # Build history for the LLM: oldest → newest
+        history_for_llm: List[Dict[str, Any]] = []
         for row in past_outputs:
-            history.append(
+            history_for_llm.append(
                 {
                     "created_at": row.created_at.isoformat(),
                     "context": row.context or {},
@@ -363,6 +363,7 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
                 }
             )
 
+        # 2) Build current context from today's metrics
         current_context = {
             "last_nights_sleep_duration_hours": metrics.last_nights_sleep_duration_hours,
             "resting_hr_bpm": metrics.resting_hr_bpm,
@@ -372,26 +373,62 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
             "residence_location": user.residence_location,
         }
 
-        agent_output = run_aura_agent(current_context, history)
+        # 3) Call the AURA agent with the *old* history
+        agent_output = run_aura_agent(current_context, history_for_llm)
 
-        # REDACT therapist info before storing in DB
-        stored_output = dict(agent_output)
-        if stored_output.get("write_therapist_mail"):
-            stored_output["therapist_mail_address"] = ""
-            stored_output["therapist_mail_title"] = ""
-            stored_output["therapist_mail_content"] = ""
+        # 4) REDACT therapist info for storage
+        redacted_output = dict(agent_output)
+        if redacted_output.get("write_therapist_mail"):
+            redacted_output["therapist_mail_address"] = ""
+            redacted_output["therapist_mail_title"] = ""
+            redacted_output["therapist_mail_content"] = ""
 
+        # 5) Use update_history to add the new entry with +7 days
+        updated_history = update_history(
+            history_for_llm,
+            redacted_output,   # what we want to store in DB
+            current_context,
+            created_at=None,   # let update_history handle +7 days logic
+            max_len=10,
+        )
+
+        # The last entry is the one we just added
+        last_entry = updated_history[-1]
+        created_at_str = last_entry["created_at"]
+        created_at_dt = datetime.datetime.fromisoformat(created_at_str)
+        stored_context = last_entry["context"]
+        stored_output = last_entry["agent_output"]
+
+        # 6) Insert new row with synthetic created_at
         new_row = AuraAgentOutput(
             user_id=user.user_id,
             output=stored_output,
-            context=current_context,  # store snapshot of metrics at this advice time
+            context=stored_context,
+            created_at=created_at_dt,  # override default timestamp
         )
         session.add(new_row)
         session.commit()
 
+        # 7) Enforce: keep only last 10 rows in DB for this user
+        all_rows = (
+            session.query(AuraAgentOutput)
+            .filter_by(user_id=user_id)
+            .order_by(AuraAgentOutput.created_at.asc())
+            .all()
+        )
+        if len(all_rows) > 10:
+            to_delete = all_rows[0 : len(all_rows) - 10]  # earliest rows
+            for r in to_delete:
+                session.delete(r)
+            session.commit()
+
+        # Return:
+        # - agent_output: full result (with therapist info if present)
+        # - history_used: what the LLM actually saw (before new entry)
+        # - current_context: today's context
         return {
             "agent_output": agent_output,
-            "history_used": history,       # used as input to the LLM
+            "history_used": history_for_llm,
             "current_context": current_context,
         }
 
