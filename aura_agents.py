@@ -213,12 +213,12 @@ IMPORTANT: Do not repeat yourself
 - Over time, as the pattern continues without improvement, your wording should reflect increasing urgency and care (while still being supportive and non-judgmental).
 
 Output fields and meaning (you MUST always include all keys in the JSON object):
-- "notification_title": short title for a popup notification to the user (can be empty string "")
-- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "")
+- "notification_title": short title for a popup notification to the user (can be empty string "" if no notification is needed because everything is fine)
+- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "" if no notification is needed because everything is fine)
 - "write_therapist_mail": boolean, true only if you think a therapist should be contacted (set it to true if the user repeatedly ignores your advice and does not improve over time)
 - "therapist_mail_address": email address of a therapist or mental health service near the residence_location when write_therapist_mail is true, else ""
-- "therapist_mail_title": subject line for the therapist email (concise, can be "")
-- "therapist_mail_content": content of the therapist email (can be "")
+- "therapist_mail_title": subject line of the email that should be sent to the therapist (concise, can be "")
+- "therapist_mail_content": content of the email that shoul be sent to the therapist (can be "")
 
 Behavioral rules:
 - You may leave notification_title and notification_description as empty strings if nothing is needed.
