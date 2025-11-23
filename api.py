@@ -1,5 +1,3 @@
-# api.py
-
 from typing import Any, Dict
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,15 +5,11 @@ from pydantic import BaseModel
 
 from aura_agents import run_aura_for_user
 
-# -------------------------------
-# FastAPI App Setup
-# -------------------------------
-
 app = FastAPI(title="AURA Backend", version="0.2.0")
 
 origins = [
-    "http://localhost:3000",  # React / Lovable
-    "http://localhost:5173",  # Vite
+    "http://localhost:3000",  
+    "http://localhost:5173",
 ]
 
 app.add_middleware(
@@ -25,10 +19,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# -------------------------------
-# Request Models
-# -------------------------------
 
 class AuraContext(BaseModel):
     last_nights_sleep_duration_hours: float | None = None
@@ -42,10 +32,6 @@ class AuraRequest(BaseModel):
     user_id: int
     context: AuraContext
 
-
-# -------------------------------
-# API Endpoints
-# -------------------------------
 
 @app.post("/run-aura")
 def run_aura_endpoint(req: AuraRequest) -> Dict[str, Any]:

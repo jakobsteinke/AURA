@@ -10,9 +10,6 @@ from dotenv import load_dotenv
 from db import SessionLocal
 from db_models import User, DailyMetrics, AuraAgentOutput
 
-# ---------------------------------------------------------------------
-# Config & Bedrock client
-# ---------------------------------------------------------------------
 
 MODEL_ID = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
@@ -24,14 +21,11 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
 brt = boto3.client(
     service_name="bedrock-runtime",
-    aws_access_key_id=AWS_ACCESS_KEY_ID,          # only needed if running locally
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,  # only needed if running locally
+    aws_access_key_id=AWS_ACCESS_KEY_ID,          
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,  
     region_name="eu-central-1",
 )
 
-# ---------------------------------------------------------------------
-# JSON helper
-# ---------------------------------------------------------------------
 
 def safe_json_loads(text: str) -> Dict[str, Any]:
     """
@@ -47,7 +41,6 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 
     cleaned = text.strip()
 
-    # Strip ```json fences if present
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
@@ -90,10 +83,6 @@ def safe_json_loads(text: str) -> Dict[str, Any]:
 
     return obj
 
-# ---------------------------------------------------------------------
-# Bedrock wrapper
-# ---------------------------------------------------------------------
-
 def call_bedrock_converse(
     user_message: str,
     model_id: str = MODEL_ID,
@@ -118,7 +107,6 @@ def call_bedrock_converse(
         }
     ]
 
-    # Build inferenceConfig so that we NEVER send both temperature and topP
     inference_config: Dict[str, Any] = {"maxTokens": max_tokens}
 
     if temperature is not None and top_p is None:
@@ -126,7 +114,6 @@ def call_bedrock_converse(
     elif top_p is not None and temperature is None:
         inference_config["topP"] = top_p
     else:
-        # If both are set or both are None, default to temperature if available
         if temperature is not None:
             inference_config["temperature"] = temperature
         elif top_p is not None:
@@ -141,10 +128,6 @@ def call_bedrock_converse(
     response_text = response["output"]["message"]["content"][0]["text"]
     logging.debug("Raw model response: %s", response_text)
     return response_text
-
-# ---------------------------------------------------------------------
-# Single AURA Agent (LLM logic only)
-# ---------------------------------------------------------------------
 
 def run_aura_agent(
     current_context: Dict[str, Any],
@@ -174,7 +157,7 @@ def run_aura_agent(
     if history is None:
         history = []
 
-    history = history[-10:]  # only last 10 entries
+    history = history[-10:]  
 
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
@@ -264,7 +247,6 @@ Now, based ONLY on the CURRENT context and HISTORY, output that single JSON obje
     response_text = call_bedrock_converse(user_message)
     result = safe_json_loads(response_text)
 
-    # Ensure all keys exist with defaults
     result.setdefault("notification_title", "")
     result.setdefault("notification_description", "")
     result.setdefault("write_therapist_mail", False)
@@ -272,7 +254,6 @@ Now, based ONLY on the CURRENT context and HISTORY, output that single JSON obje
     result.setdefault("therapist_mail_title", "")
     result.setdefault("therapist_mail_content", "")
 
-    # If we're not writing an email, clear all therapist fields
     if not bool(result.get("write_therapist_mail")):
         result["write_therapist_mail"] = False
         result["therapist_mail_address"] = ""
@@ -295,7 +276,6 @@ def update_history(
     """
     import datetime as _dt
 
-    # --- Step 1: Determine timestamp for new entry ---
     if created_at:
         ts = _dt.datetime.fromisoformat(created_at)
     else:
@@ -305,20 +285,15 @@ def update_history(
         else:
             ts = _dt.datetime.utcnow()
 
-    # --- Step 2: Construct the new entry ---
     entry = {
         "created_at": ts.isoformat(),
         "context": new_context,
         "agent_output": new_output,
     }
 
-    # --- Step 3: Update history and trim to last 10 entries ---
     history = (history or []) + [entry]
     return history[-max_len:]
 
-# ---------------------------------------------------------------------
-# DB-integrated helper: run agent for a given user_id
-# ---------------------------------------------------------------------
 
 def run_aura_for_user(
     user_id: int,
@@ -341,7 +316,6 @@ def run_aura_for_user(
     try:
         user = session.query(User).filter_by(user_id=user_id).one()
 
-        # 1) Load ALL existing outputs for this user (oldest first)
         past_outputs = (
             session.query(AuraAgentOutput)
             .filter_by(user_id=user_id)
@@ -349,7 +323,6 @@ def run_aura_for_user(
             .all()
         )
 
-        # Build history for the LLM: oldest → newest
         history_for_llm: List[Dict[str, Any]] = []
         for row in past_outputs:
             history_for_llm.append(
@@ -360,48 +333,40 @@ def run_aura_for_user(
                 }
             )
 
-        # 2) Build current context
-        # Use the context provided by the caller (e.g. API)
         current_context = {
             "last_nights_sleep_duration_hours": current_context_override.get("last_nights_sleep_duration_hours"),
             "resting_hr_bpm": current_context_override.get("resting_hr_bpm"),
             "total_screen_minutes": current_context_override.get("total_screen_minutes"),
             "steps": current_context_override.get("steps"),
             "long_sessions_over_20_min": current_context_override.get("long_sessions_over_20_min"),
-            # fall back to stored user residence if not provided
             "residence_location": current_context_override.get("residence_location") or user.residence_location,
         }
 
-        # 3) Call the AURA agent with the *old* history
         agent_output = run_aura_agent(current_context, history_for_llm)
 
-        # 4) Use update_history to add the new entry with +7 days
         updated_history = update_history(
             history_for_llm,
-            agent_output,    # store full output INCLUDING therapist info
+            agent_output,    
             current_context,
-            created_at=None, # let update_history handle +7 days logic
+            created_at=None, # let update_history handle +7 days logic (we mock artificial time between entries here)
             max_len=10,
         )
 
-        # The last entry is the one we just added
         last_entry = updated_history[-1]
         created_at_str = last_entry["created_at"]
         created_at_dt = datetime.datetime.fromisoformat(created_at_str)
         stored_context = last_entry["context"]
         stored_output = last_entry["agent_output"]
 
-        # 5) Insert new row with synthetic created_at
         new_row = AuraAgentOutput(
             user_id=user.user_id,
-            output=stored_output,   # now includes therapist fields
+            output=stored_output,   
             context=stored_context,
-            created_at=created_at_dt,  # override default timestamp
+            created_at=created_at_dt,  # override default timestamp (we mock artificial time between entries here)
         )
         session.add(new_row)
         session.commit()
 
-        # 6) Enforce: keep only last 10 rows in DB for this user
         all_rows = (
             session.query(AuraAgentOutput)
             .filter_by(user_id=user_id)
@@ -409,15 +374,11 @@ def run_aura_for_user(
             .all()
         )
         if len(all_rows) > 10:
-            to_delete = all_rows[0 : len(all_rows) - 10]  # earliest rows
+            to_delete = all_rows[0 : len(all_rows) - 10]  
             for r in to_delete:
                 session.delete(r)
             session.commit()
 
-        # Return:
-        # - agent_output: full result (with therapist info if present)
-        # - history_used: what the LLM actually saw (before new entry)
-        # - current_context: today's / override context
         return {
             "agent_output": agent_output,
             "history_used": history_for_llm,
@@ -427,13 +388,9 @@ def run_aura_for_user(
     finally:
         session.close()
 
-# ---------------------------------------------------------------------
-# Simple demo (assumes a user with user_id=1 exists and has metrics)
-# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     try:
-        # Demo without override → uses DailyMetrics
         output = run_aura_for_user(user_id=1)
         print("=== AURA Agent Output ===")
         print(json.dumps(output, indent=2, ensure_ascii=False))

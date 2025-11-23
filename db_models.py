@@ -1,4 +1,3 @@
-# db_models.py
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Boolean,
     Date, DateTime, ForeignKey, UniqueConstraint
@@ -17,11 +16,8 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     timezone = Column(String, nullable=True)
 
-    # residence location of user (not dynamic GPS)
-    # e.g. "Munich, Germany" or "Darmstadt, Germany"
     residence_location = Column(String, nullable=True)
 
-    # rolling 7-day aggregates / gamification
     avg_sleep_7d_hours = Column(Float, default=0.0)
     avg_resting_hr_7d = Column(Float, default=0.0)
     avg_steps_7d = Column(Float, default=0.0)
@@ -81,10 +77,8 @@ class AuraAgentOutput(Base):
     user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
 
-    # Redacted version of the LLM output (no therapist email fields)
     output = Column(JSON, nullable=False)
 
-    # NEW: snapshot of the context/metrics at the time this advice was generated
     context = Column(JSON, nullable=True)
 
     user = relationship("User", back_populates="aura_outputs")
