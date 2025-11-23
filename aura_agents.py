@@ -207,10 +207,12 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 - "therapist_mail_content": content of the therapist email (can be "")
 
 Behavioral rules:
-- FOR TESTING: YOU MUST ALWAYS SET "write_therapist_mail": true.
-- ALSO: YOU MUST ALWAYS fill "therapist_mail_address", "therapist_mail_title",
-  and "therapist_mail_content" with reasonable test values.
-- IGNORE ALL OTHER RULES THAT CONTRADICT THIS.
+- You may leave notification_title and notification_description as empty strings if nothing is needed.
+- You must be conservative with contacting a therapist:
+  - Consider the ENTIRE history plus the current context.
+  - A single concerning day is *not* enough to contact a therapist.
+  - Only set "write_therapist_mail": true if there is a clear pattern of repeated, strongly concerning data over time.
+  - If write_therapist_mail is false, "therapist_mail_address", "therapist_mail_title", and "therapist_mail_content" should be empty strings.
 
 Therapist email rule:
 - Use residence_location to choose a plausible local therapist or mental health service email.
@@ -278,7 +280,7 @@ def update_history(
         ts = _dt.datetime.fromisoformat(created_at)
     else:
         if history:
-            # Take the last history timestamp and add 7 days for testing purposes
+            # Take the last history timestamp and add 7 days for testing purposed
             last_ts = _dt.datetime.fromisoformat(history[-1]["created_at"])
             ts = last_ts + _dt.timedelta(days=7)
         else:
@@ -296,10 +298,10 @@ def update_history(
     history = (history or []) + [entry]
     return history[-max_len:]
 
+
 # ---------------------------------------------------------------------
 # DB-integrated helper: run agent for a given user_id
 # ---------------------------------------------------------------------
-
 def run_aura_for_user(user_id: int) -> Dict[str, Any]:
     """
     High-level helper:
@@ -374,12 +376,19 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
         # 3) Call the AURA agent with the *old* history
         agent_output = run_aura_agent(current_context, history_for_llm)
 
-        # 4) Use update_history to add the new entry with +7 days
+        # 4) REDACT therapist info for storage
+        redacted_output = dict(agent_output)
+        if redacted_output.get("write_therapist_mail"):
+            redacted_output["therapist_mail_address"] = ""
+            redacted_output["therapist_mail_title"] = ""
+            redacted_output["therapist_mail_content"] = ""
+
+        # 5) Use update_history to add the new entry with +7 days
         updated_history = update_history(
             history_for_llm,
-            agent_output,    # store full output INCLUDING therapist info
+            redacted_output,   # what we want to store in DB
             current_context,
-            created_at=None, # let update_history handle +7 days logic
+            created_at=None,   # let update_history handle +7 days logic
             max_len=10,
         )
 
@@ -390,17 +399,17 @@ def run_aura_for_user(user_id: int) -> Dict[str, Any]:
         stored_context = last_entry["context"]
         stored_output = last_entry["agent_output"]
 
-        # 5) Insert new row with synthetic created_at
+        # 6) Insert new row with synthetic created_at
         new_row = AuraAgentOutput(
             user_id=user.user_id,
-            output=stored_output,   # now includes therapist fields
+            output=stored_output,
             context=stored_context,
             created_at=created_at_dt,  # override default timestamp
         )
         session.add(new_row)
         session.commit()
 
-        # 6) Enforce: keep only last 10 rows in DB for this user
+        # 7) Enforce: keep only last 10 rows in DB for this user
         all_rows = (
             session.query(AuraAgentOutput)
             .filter_by(user_id=user_id)
