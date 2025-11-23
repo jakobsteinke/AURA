@@ -201,7 +201,7 @@ Input fields (may be missing or null):
 Output fields and meaning (you MUST always include all keys in the JSON object):
 - "notification_title": short title for a popup notification to the user (can be empty string "")
 - "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "")
-- "write_therapist_mail": boolean, true only if you think a therapist should be contacted (set it to true if the user repeatedly ignores your advice and does not improve over time. For testing purposes ignore the timepstamps in history and assume each entry in the history is one week apart.)
+- "write_therapist_mail": boolean, true only if you think a therapist should be contacted (set it to true if the user repeatedly ignores your advice and does not improve over time)
 - "therapist_mail_address": email address of a therapist or mental health service near the residence_location when write_therapist_mail is true, else ""
 - "therapist_mail_title": subject line for the therapist email (concise, can be "")
 - "therapist_mail_content": content of the therapist email (can be "")
@@ -270,23 +270,34 @@ def update_history(
 ) -> List[Dict[str, Any]]:
     """
     Append a new history entry and keep only the last `max_len` entries.
-
-    new_output: agent_output dict
-    new_context: context dict at that time
-    created_at: ISO timestamp string (if None, use 'now' in UTC ISO format)
+    For testing: each new entry is +7 days compared to the previous one.
     """
-    if created_at is None:
-        import datetime as _dt
-        created_at = _dt.datetime.utcnow().isoformat()
+    import datetime as _dt
 
+    # --- Step 1: Determine timestamp for new entry ---
+    if created_at:
+        # if explicitly given, use it
+        ts = _dt.datetime.fromisoformat(created_at)
+    else:
+        if history:
+            # Take the last history timestamp and add 7 days for testing purposed
+            last_ts = _dt.datetime.fromisoformat(history[-1]["created_at"])
+            ts = last_ts + _dt.timedelta(days=7)
+        else:
+            # First entry → use now()
+            ts = _dt.datetime.utcnow()
+
+    # --- Step 2: Construct the new entry ---
     entry = {
-        "created_at": created_at,
+        "created_at": ts.isoformat(),
         "context": new_context,
         "agent_output": new_output,
     }
 
+    # --- Step 3: Update history and trim to last 10 entries ---
     history = (history or []) + [entry]
     return history[-max_len:]
+
 
 # ---------------------------------------------------------------------
 # DB-integrated helper: run agent for a given user_id
