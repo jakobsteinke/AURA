@@ -84,14 +84,8 @@ def run_aura_agent(
       - residence_location: str | None (e.g. "Munich, Germany")
 
     history: list (oldest first) of up to 10 previous agent calls.
-             Each element has the form:
-             {
-               "created_at": "... ISO timestamp ...",
-               "context": {... metrics at that time ...},
-               "agent_output": {... stored_output ...}
-             }
 
-    Output: dict with keys (any may be empty strings / False):
+    Output JSON keys:
       - notification_title: str
       - notification_description: str
       - write_therapist_mail: bool
@@ -107,6 +101,7 @@ def run_aura_agent(
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
 
+    # IMPORTANT: no hard-coded numbers in examples
     examples = r"""
 Example 1 (everything fine, no notification, no therapist):
 {
@@ -121,7 +116,7 @@ Example 1 (everything fine, no notification, no therapist):
 Example 2 (mildly concerning day, notification only):
 {
   "notification_title": "Gentle reminder to rest",
-  "notification_description": "You slept only 4.0 hours last night and spent a lot of time on screens. Try to take a short break and wind down a bit earlier today.",
+  "notification_description": "You seem to have slept less than usual and spent a lot of time on screens. Try to take a short break and wind down a bit earlier today.",
   "write_therapist_mail": false,
   "therapist_mail_address": "",
   "therapist_mail_title": "",
@@ -131,7 +126,7 @@ Example 2 (mildly concerning day, notification only):
 Example 3 (repeated concerning pattern, suggest therapist):
 {
   "notification_title": "Consider getting extra support",
-  "notification_description": "Your recent days show very little sleep and high screen time. It might help to talk to a professional about how you’re feeling.",
+  "notification_description": "Your recent days show very poor sleep and high screen time. It might help to talk to a professional about how you’re feeling.",
   "write_therapist_mail": true,
   "therapist_mail_address": "info@psychotherapie-muenchen.de",
   "therapist_mail_title": "Request for an initial consultation",
@@ -161,7 +156,8 @@ Your goals:
 - Very rarely, decide whether to suggest contacting a therapist via email.
 
 Input fields (may be missing or null):
-- last_nights_sleep_duration_hours: TOTAL number of hours the user actually slept last night (for example 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short).
+- last_nights_sleep_duration_hours: TOTAL number of hours the user actually slept last night
+  (for example 3.2 means they slept 3.2 hours, NOT that they are 3.2 hours short).
 - resting_hr_bpm: the user's resting heart rate in beats per minute.
 - total_screen_minutes: total minutes spent on screens today.
 - steps: total steps walked today.
@@ -171,8 +167,19 @@ Input fields (may be missing or null):
 Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT copy them literally, adapt to the current data):
 {examples}
 
+STRICT RULES ABOUT NUMBERS (VERY IMPORTANT):
+- You MUST NOT invent any numeric values (hours, minutes, steps, heart rate, counts).
+- If you mention a concrete number (like hours of sleep, minutes on screen, or steps),
+  it MUST come directly from the CURRENT context or from a specific day in the HISTORY.
+- If you mention last_nights_sleep_duration_hours, you MUST use exactly the numeric value
+  from current_context["last_nights_sleep_duration_hours"].
+- You MUST NOT write phrases like "X hours too short" because the required baseline
+  (how many hours the user needs) is NOT provided.
+- If a field is null or missing, you MUST NOT invent a numeric value for it.
+  In that case, speak qualitatively (e.g., "less sleep than usual") or avoid mentioning numbers.
+
 IMPORTANT: Therapist decision
-- "write_therapist_mail" must be true if you detect slightly concerning data or a clear concerning pattern over several days.
+- "write_therapist_mail" must be true if you detect clearly concerning data or a clear concerning pattern over several days.
 - If everything looks fine, keep "write_therapist_mail" false.
 - When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
 - When "write_therapist_mail" is false, those three fields MUST be empty strings.
@@ -182,16 +189,16 @@ IMPORTANT: Do not repeat yourself
   - notification_title
   - notification_description
 - You MUST NOT return exactly the same notification_title and notification_description as any previous history entry.
-- If your best advice is similar to something you said before, you MUST rephrase it and/or make it slightly more specific or escalated (for example, suggest a concrete next step or timing).
+- If your best advice is similar to something you said before, you MUST rephrase it and/or make it slightly more specific or escalated.
 - Over time, as the pattern continues without improvement, your wording should reflect increasing urgency and care (while still being supportive and non-judgmental).
 
 Output fields and meaning (you MUST always include all keys in the JSON object):
-- "notification_title": short title for a popup notification to the user (can be empty string "" if no notification is needed because everything is fine)
-- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "" if no notification is needed because everything is fine)
-- "write_therapist_mail": boolean, true only if you think a therapist should be contacted (set it to true if the user repeatedly ignores your advice and does not improve over time)
-- "therapist_mail_address": email address of a therapist or mental health service near the residence_location when write_therapist_mail is true, else ""
-- "therapist_mail_title": subject line of the email that should be sent to the therapist (concise, can be "")
-- "therapist_mail_content": content of the email that should be sent to the therapist (can be "")
+- "notification_title": short title for a popup notification to the user (can be empty string "" if no notification is needed)
+- "notification_description": 1–2 sentences suggesting what the user could do next (can be empty "" if no notification is needed)
+- "write_therapist_mail": boolean
+- "therapist_mail_address": string
+- "therapist_mail_title": string
+- "therapist_mail_content": string
 
 STRICT OUTPUT FORMAT (THIS IS CRITICAL):
 - You MUST produce exactly ONE JSON object for the CURRENT situation.
@@ -204,12 +211,11 @@ STRICT OUTPUT FORMAT (THIS IS CRITICAL):
   "write_therapist_mail", "therapist_mail_address",
   "therapist_mail_title", "therapist_mail_content".
 
-Now, based on the CURRENT context and history only, output that single JSON object.
+Now, based ONLY on the CURRENT context and HISTORY, output that single JSON object.
 """
 
     response_text = call_bedrock_converse(user_message)
 
-    # Simple JSON parsing using the strict format instructions
     try:
         result = json.loads(response_text)
     except json.JSONDecodeError:
@@ -233,9 +239,6 @@ Now, based on the CURRENT context and history only, output that single JSON obje
 
     return result
 
-# ---------------------------------------------------------------------
-# (Optional) in-memory history helper
-# ---------------------------------------------------------------------
 
 def update_history(
     history: List[Dict[str, Any]],
