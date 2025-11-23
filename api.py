@@ -1,58 +1,61 @@
 # api.py
 
 from typing import Any, Dict
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from aura_agents import (
-    run_screen_behavior_agent,
-    run_sleep_recovery_agent,
-    compute_aura_points,
-)
+from aura_agents import run_aura_for_user
 
 # -------------------------------
 # FastAPI App Setup
 # -------------------------------
 
-app = FastAPI(title="AURA Backend", version="0.1.0")
+app = FastAPI(title="AURA Backend", version="0.2.0")
 
 origins = [
-    "http://localhost:3000",  # Lovable / React
+    "http://localhost:3000",  # React / Lovable
     "http://localhost:5173",  # Vite
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,        # <= IMPORTANT for frontend calls
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -------------------------------
+# Request Models
+# -------------------------------
+
+class AuraRequest(BaseModel):
+    user_id: int
+
+
+# -------------------------------
 # API Endpoints
 # -------------------------------
 
-@app.post("/screen-agent")
-def screen_agent_endpoint(screen_context: Dict[str, Any]) -> Dict[str, Any]:
+@app.post("/run-aura")
+def run_aura_endpoint(req: AuraRequest) -> Dict[str, Any]:
     """
-    Call the Screen Behavior Agent.
-    The frontend sends JSON – we directly pass it to the agent.
-    """
-    return run_screen_behavior_agent(screen_context)
+    Call the unified AURA agent for a given user_id.
 
+    Assumes:
+    - The user with this user_id exists in the `users` table.
+    - Today's metrics for this user exist in `daily_metrics`
+      (or will be created empty by run_aura_for_user).
+    - History is loaded from `aura_agent_outputs`.
 
-@app.post("/sleep-agent")
-def sleep_agent_endpoint(sleep_context: Dict[str, Any]) -> Dict[str, Any]:
+    Returns:
+    - The full agent output (including notification + optional therapist mail),
+      but therapist details are NOT stored in the database.
     """
-    Call the Sleep + Recovery Agent.
-    """
-    return run_sleep_recovery_agent(sleep_context)
-
-
-@app.post("/aura-points")
-def aura_points_endpoint(aura_input: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Compute Aura Points / gamification summary.
-    """
-    return compute_aura_points(aura_input)
+    try:
+        result = run_aura_for_user(req.user_id)
+        return result
+    except Exception as e:
+        # Optional: log the error in more detail
+        raise HTTPException(status_code=500, detail=str(e))
