@@ -222,10 +222,11 @@ STRICT RULES ABOUT NUMBERS (VERY IMPORTANT):
 
 IMPORTANT: Therapist decision
 - "write_therapist_mail" must be true if you detect clearly concerning data or a clear concerning pattern over multiple days.
-- only use this in extreme cases where the user's well-being seems seriously at risk (not just after a single bad day).
+- Only use this in extreme cases where the user's well-being seems seriously at risk (not just after a single bad day, only after multiple consecutive extremely bad entries in the history).
 - If everything looks fine, keep "write_therapist_mail" false.
 - When "write_therapist_mail" is true, you MUST fill therapist_mail_address, therapist_mail_title, and therapist_mail_content with plausible values.
 - When "write_therapist_mail" is false, those three fields MUST be empty strings.
+- The mail to the therapist must be written in first person, as if written by the user. It should explain the situation and ask for an appointment.
 
 IMPORTANT: Do not repeat yourself
 - Read all previous "agent_output" objects in the history, especially:
