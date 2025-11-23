@@ -245,7 +245,7 @@ Output fields and meaning (you MUST always include all keys in the JSON object):
 - "therapist_mail_address": string
 - "therapist_mail_title": string
 - "therapist_mail_content": string
-- aura_points: int  (overall score for how positive the day and recent streak are)
+- aura_points: int  (overall score for how positive the day and recent streak are, only give aura_points > 0 if everything is positive)
 
 STRICT OUTPUT FORMAT (THIS IS CRITICAL):
 - You MUST produce exactly ONE JSON object for the CURRENT situation.
