@@ -358,53 +358,16 @@ def run_aura_for_user(
             )
 
         # 2) Build current context
-        if current_context_override is not None:
-            # Use the context provided by the caller (e.g. API)
-            current_context = {
-                "last_nights_sleep_duration_hours": current_context_override.get("last_nights_sleep_duration_hours"),
-                "resting_hr_bpm": current_context_override.get("resting_hr_bpm"),
-                "total_screen_minutes": current_context_override.get("total_screen_minutes"),
-                "steps": current_context_override.get("steps"),
-                "long_sessions_over_20_min": current_context_override.get("long_sessions_over_20_min"),
-                # fall back to stored user residence if not provided
-                "residence_location": current_context_override.get("residence_location") or user.residence_location,
-            }
-        else:
-            # Legacy behavior: use today's metrics from DailyMetrics
-            today = datetime.date.today()
-
-            metrics = (
-                session.query(DailyMetrics)
-                .filter_by(user_id=user_id, day=today)
-                .one_or_none()
-            )
-
-            if metrics is None:
-                logging.warning(
-                    "No DailyMetrics found for user %s on %s, creating empty row.",
-                    user_id,
-                    today,
-                )
-                metrics = DailyMetrics(
-                    user_id=user_id,
-                    day=today,
-                    last_nights_sleep_duration_hours=None,
-                    resting_hr_bpm=None,
-                    total_screen_minutes=None,
-                    steps=None,
-                    long_sessions_over_20_min=None,
-                )
-                session.add(metrics)
-                session.commit()
-
-            current_context = {
-                "last_nights_sleep_duration_hours": metrics.last_nights_sleep_duration_hours,
-                "resting_hr_bpm": metrics.resting_hr_bpm,
-                "total_screen_minutes": metrics.total_screen_minutes,
-                "steps": metrics.steps,
-                "long_sessions_over_20_min": metrics.long_sessions_over_20_min,
-                "residence_location": user.residence_location,
-            }
+        # Use the context provided by the caller (e.g. API)
+        current_context = {
+            "last_nights_sleep_duration_hours": current_context_override.get("last_nights_sleep_duration_hours"),
+            "resting_hr_bpm": current_context_override.get("resting_hr_bpm"),
+            "total_screen_minutes": current_context_override.get("total_screen_minutes"),
+            "steps": current_context_override.get("steps"),
+            "long_sessions_over_20_min": current_context_override.get("long_sessions_over_20_min"),
+            # fall back to stored user residence if not provided
+            "residence_location": current_context_override.get("residence_location") or user.residence_location,
+        }
 
         # 3) Call the AURA agent with the *old* history
         agent_output = run_aura_agent(current_context, history_for_llm)
