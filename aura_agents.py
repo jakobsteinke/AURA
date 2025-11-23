@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,67 @@ brt = boto3.client(
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,  # only needed if running locally
     region_name="eu-central-1",
 )
+
+# ---------------------------------------------------------------------
+# JSON helper
+# ---------------------------------------------------------------------
+
+def safe_json_loads(text: str) -> Dict[str, Any]:
+    """
+    Safely parse JSON from model output.
+
+    - Strips markdown fences and whitespace.
+    - Keeps only the substring from first '{' to last '}'.
+    - Tries json.loads; if it fails, auto-closes up to 3 missing '}'.
+    - Returns {} on failure.
+    """
+    if not text:
+        return {}
+
+    cleaned = text.strip()
+
+    # Strip ```json fences if present
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9]*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first == -1 or last == -1 or last <= first:
+        logging.error("No JSON object found in model output: %r", text)
+        return {}
+
+    candidate = cleaned[first:last + 1]
+
+    try:
+        obj = json.loads(candidate)
+    except json.JSONDecodeError:
+        open_count = candidate.count("{")
+        close_count = candidate.count("}")
+        max_extra_braces = 3
+        obj = None
+
+        for _ in range(max_extra_braces):
+            if close_count >= open_count:
+                break
+            candidate += "}"
+            close_count += 1
+            try:
+                obj = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                obj = None
+
+        if obj is None:
+            logging.error("Failed to parse model JSON even after repair; raw=%r", text)
+            return {}
+
+    if not isinstance(obj, dict):
+        logging.error("Parsed JSON is not an object: %r", obj)
+        return {}
+
+    return obj
 
 # ---------------------------------------------------------------------
 # Bedrock wrapper
@@ -117,39 +179,6 @@ def run_aura_agent(
     current_context_json = json.dumps(current_context, ensure_ascii=False)
     history_json = json.dumps(history, ensure_ascii=False)
 
-    # IMPORTANT: no hard-coded numbers in examples
-    examples = r"""
-Example 1 (everything fine, no notification, no therapist):
-{
-  "notification_title": "",
-  "notification_description": "",
-  "write_therapist_mail": false,
-  "therapist_mail_address": "",
-  "therapist_mail_title": "",
-  "therapist_mail_content": ""
-}
-
-Example 2 (mildly concerning day, notification only):
-{
-  "notification_title": "Gentle reminder to rest",
-  "notification_description": "You seem to have slept less than usual and spent a lot of time on screens. Try to take a short break and wind down a bit earlier today.",
-  "write_therapist_mail": false,
-  "therapist_mail_address": "",
-  "therapist_mail_title": "",
-  "therapist_mail_content": ""
-}
-
-Example 3 (repeated concerning pattern, suggest therapist):
-{
-  "notification_title": "Consider getting extra support",
-  "notification_description": "Your recent days show very poor sleep and high screen time. It might help to talk to a professional about how you’re feeling.",
-  "write_therapist_mail": true,
-  "therapist_mail_address": "info@psychotherapie-muenchen.de",
-  "therapist_mail_title": "Request for an initial consultation",
-  "therapist_mail_content": "Dear therapist,\n\nI have been experiencing poor sleep and high stress for several days in a row. I would like to ask for an initial consultation to discuss my situation and possible next steps.\n\nKind regards,\nA concerned patient"
-}
-"""
-
     user_message = f"""
 You are the single AURA Agent (Adaptive Unified Routine Assistant).
 
@@ -179,9 +208,6 @@ Input fields (may be missing or null):
 - steps: total steps walked today.
 - long_sessions_over_20_min: number of long screen sessions (> 20 minutes) today.
 - residence_location: the city and country where the user lives.
-
-Here are EXAMPLES of VALID output JSON objects (they are only examples, do NOT copy them literally, adapt to the current data):
-{examples}
 
 STRICT RULES ABOUT NUMBERS (VERY IMPORTANT):
 - You MUST NOT invent any numeric values (hours, minutes, steps, heart rate, counts).
@@ -231,12 +257,7 @@ Now, based ONLY on the CURRENT context and HISTORY, output that single JSON obje
 """
 
     response_text = call_bedrock_converse(user_message)
-
-    try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError:
-        logging.error("Failed to parse model JSON: %r", response_text)
-        result = {}
+    result = safe_json_loads(response_text)
 
     # Ensure all keys exist with defaults
     result.setdefault("notification_title", "")
