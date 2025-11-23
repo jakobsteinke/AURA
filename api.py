@@ -30,8 +30,17 @@ app.add_middleware(
 # Request Models
 # -------------------------------
 
+class AuraContext(BaseModel):
+    last_nights_sleep_duration_hours: float | None = None
+    resting_hr_bpm: int | None = None
+    total_screen_minutes: int | None = None
+    steps: int | None = None
+    long_sessions_over_20_min: int | None = None
+    residence_location: str | None = None
+
 class AuraRequest(BaseModel):
     user_id: int
+    context: AuraContext
 
 
 # -------------------------------
@@ -41,21 +50,16 @@ class AuraRequest(BaseModel):
 @app.post("/run-aura")
 def run_aura_endpoint(req: AuraRequest) -> Dict[str, Any]:
     """
-    Call the unified AURA agent for a given user_id.
+    Call the unified AURA agent for a given user_id and an explicit context.
 
     Assumes:
     - The user with this user_id exists in the `users` table.
-    - Today's metrics for this user exist in `daily_metrics`
-      (or will be created empty by run_aura_for_user).
     - History is loaded from `aura_agent_outputs`.
-
-    Returns:
-    - The full agent output (including notification + optional therapist mail),
-      but therapist details are NOT stored in the database.
+    - The *current* context is provided by the client in the request body.
     """
     try:
-        result = run_aura_for_user(req.user_id)
+        current_context = req.context.dict()
+        result = run_aura_for_user(req.user_id, current_context_override=current_context)
         return result
     except Exception as e:
-        # Optional: log the error in more detail
         raise HTTPException(status_code=500, detail=str(e))
